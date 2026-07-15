@@ -1,0 +1,6 @@
+# Local installation backups and editor files
+.project-flow-backup/
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
