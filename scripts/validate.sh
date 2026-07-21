@@ -40,7 +40,7 @@ done
 config="$target_root/.agents/workflow.json"
 if [ -f "$config" ]; then
     grep -Eq '"schema_version"[[:space:]]*:[[:space:]]*1' "$config" || error "Unsupported or missing schema_version"
-    for role in project_state module_index current_task risks decisions periodic_log; do
+    for role in project_state module_index current_task periodic_log; do
         path=$(sed -n "s/.*\"$role\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" "$config" | head -n 1)
         if [ -z "$path" ]; then
             error "Missing document role: $role"

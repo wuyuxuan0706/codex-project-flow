@@ -27,5 +27,5 @@
 
 ## 完成后需要更新
 
-- 根据实际影响更新 `docs/PROJECT_STATE.md`、`docs/MODULE_INDEX.md`、`docs/RISKS.md` 和 `docs/DECISIONS.md` 中的相关项。
+- 根据实际影响更新 `docs/PROJECT_STATE.md` 和 `docs/MODULE_INDEX.md` 中的相关项。
 - `docs/WEEKLY_LOG.md` 仅在配置的更新时间到达或用户明确要求时更新。

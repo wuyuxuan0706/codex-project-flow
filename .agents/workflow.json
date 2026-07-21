@@ -13,8 +13,6 @@
       "project_state": "docs/PROJECT_STATE.md",
       "module_index": "docs/MODULE_INDEX.md",
       "current_task": "docs/NEXT_TASK.md",
-      "risks": "docs/RISKS.md",
-      "decisions": "docs/DECISIONS.md",
       "periodic_log": "docs/WEEKLY_LOG.md"
     },
     "source_roots": [
@@ -28,8 +26,6 @@
     "docs/PROJECT_STATE.md",
     "docs/MODULE_INDEX.md",
     "docs/NEXT_TASK.md",
-    "docs/RISKS.md",
-    "docs/DECISIONS.md",
     "docs/WEEKLY_LOG.md"
   ],
   "missing_document_policy": "warn",
@@ -39,9 +35,7 @@
   },
   "sync_policy": {
     "after_source_change": [
-      "current_task",
-      "risks",
-      "decisions"
+      "current_task"
     ],
     "when_stage_changes": [
       "project_state"

@@ -24,6 +24,16 @@ grep -q '"name": "Empty Project"' "$empty_target/.agents/workflow.json" || {
     echo "Project name rendering failed." >&2
     exit 1
 }
+if grep -Eq '"(risks|decisions)"[[:space:]]*:' "$empty_target/.agents/workflow.json"; then
+    echo "Removed document roles were installed." >&2
+    exit 1
+fi
+for removed_document in docs/RISKS.md docs/DECISIONS.md; do
+    [ ! -e "$empty_target/$removed_document" ] || {
+        echo "Removed document was installed: $removed_document" >&2
+        exit 1
+    }
+done
 
 digest_tree() {
     root=$1

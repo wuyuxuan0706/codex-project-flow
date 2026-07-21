@@ -18,8 +18,6 @@
 - `docs/PROJECT_STATE.md`
 - `docs/MODULE_INDEX.md`
 - `docs/NEXT_TASK.md`
-- `docs/RISKS.md`
-- `docs/DECISIONS.md`
 - `docs/WEEKLY_LOG.md`
 
 若文件缺失，先报告缺失项；除非用户要求初始化或修复工作流，不要擅自创建项目事实。
@@ -37,8 +35,6 @@
 ## 状态与文档同步
 
 - 修改源码、配置或自动化后，按 `.agents/workflow.json` 的 `sync_policy` 同步当前任务和受影响文档。
-- 发现新风险、阻塞或失败现象时，更新 `docs/RISKS.md`。
-- 形成新的架构、协议、依赖、测试或集成决策时，更新 `docs/DECISIONS.md`。
 - 项目阶段或主线方向变化时，更新 `docs/PROJECT_STATE.md`。
 - 当前任务、验收状态或后续动作变化时，更新 `docs/NEXT_TASK.md`。
 - 模块边界或主要入口变化时，更新 `docs/MODULE_INDEX.md`。

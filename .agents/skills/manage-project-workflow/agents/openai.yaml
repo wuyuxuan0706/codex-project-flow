@@ -1,4 +1,4 @@
 interface:
   display_name: "Manage Project Workflow"
-  short_description: "Keep tasks, status, risks, decisions, and summaries aligned"
+  short_description: "Keep tasks, status, modules, and summaries aligned"
   default_prompt: "Use $manage-project-workflow to inspect this repository and synchronize its project workflow records."

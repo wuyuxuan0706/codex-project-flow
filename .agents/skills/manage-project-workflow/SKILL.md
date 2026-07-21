@@ -1,6 +1,6 @@
 ---
 name: manage-project-workflow
-description: Maintain project context, module index, one current task, evidence-based status, risks, decisions, and periodic summaries across arbitrary repository structures. Use when Codex needs to onboard to a repository, set or refine the user-authorized next task, synchronize project records after development, prepare a weekly summary, or audit workflow consistency.
+description: Maintain project context, module index, one current task, evidence-based status, and periodic summaries across arbitrary repository structures. Use when Codex needs to onboard to a repository, set or refine the user-authorized next task, synchronize project records after development, prepare a weekly summary, or audit workflow consistency.
 ---
 
 # Manage Project Workflow
@@ -17,7 +17,7 @@ Treat configured paths as defaults, not evidence that a directory exists. Discov
 
 ## Select the operation
 
-- **Onboard**: read only; summarize the project stage, current task, main modules, risks, and missing context.
+- **Onboard**: read only; summarize the project stage, current task, main modules, blockers, and missing context.
 - **Set task**: require a user-specified task or explicit authority to derive it from an issue/milestone. Keep no more than `task_policy.max_active_tasks` active tasks.
 - **Develop**: change only the authorized task scope, run safe relevant checks, then apply the configured document synchronization rules.
 - **Synchronize**: use the current turn baseline, unstaged diff, staged diff, untracked files, relevant commits, command output, and user-reported target results. Do not attribute unrelated dirty-worktree changes to the current task.
@@ -40,8 +40,6 @@ Never convert a plan, checklist, code inspection, historical test, or another en
 - Update the current-task document when scope, status, acceptance evidence, blocker, or next action changes.
 - Update project state only when the stage, main capability, primary blocker, or next direction changes.
 - Update the module index when module ownership, major paths, or entry points change.
-- Update risks when a new delivery/verification risk appears or an existing risk materially changes.
-- Update decisions when an explicit architecture, protocol, dependency, testing, or integration choice is made.
 - Update the periodic log according to `sync_policy` and `schedule`; do not use it as a file-by-file development diary.
 
 Read [references/document-contracts.md](references/document-contracts.md) before creating a missing workflow document or changing its section schema.

@@ -7,9 +7,7 @@ Use the paths configured in `.agents/workflow.json`; the filenames below are def
 1. Project state
 2. Module index
 3. Current task
-4. Risks
-5. Decisions
-6. Periodic log
+4. Periodic log
 
 ## Project state
 
@@ -55,30 +53,6 @@ Required sections:
 ```
 
 If the task is missing or still contains placeholder text, do not start development. Ask for a concrete task unless `task_policy.source` grants explicit issue/milestone or autonomous derivation authority.
-
-## Risks
-
-Purpose: track real conditions that can affect delivery, safety, correctness, or verification.
-
-Recommended columns:
-
-```md
-| ID | Risk / blocker | Impact | Evidence | Status | Mitigation / next action |
-```
-
-Do not list generic anxieties without project evidence. Close or supersede entries instead of deleting history when that history remains useful.
-
-## Decisions
-
-Purpose: preserve choices that constrain later implementation.
-
-Recommended columns:
-
-```md
-| ID | Date | Decision | Reason | Scope | Status / review condition |
-```
-
-Record decisions, not unresolved options. Put unresolved choices in the task or risk document.
 
 ## Periodic log
 
