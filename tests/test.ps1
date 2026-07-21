@@ -31,6 +31,14 @@ try {
     if ($configText.Contains("<PROJECT_NAME>") -or -not $configText.Contains("Empty Project")) {
         throw "Project name rendering failed."
     }
+    if ($configText.Contains('"risks"') -or $configText.Contains('"decisions"')) {
+        throw "Removed document roles were installed."
+    }
+    foreach ($removedDocument in @("docs/RISKS.md", "docs/DECISIONS.md")) {
+        if (Test-Path -LiteralPath (Join-Path $emptyTarget $removedDocument)) {
+            throw "Removed document was installed: $removedDocument"
+        }
+    }
 
     $firstDigest = Get-ManagedDigest $emptyTarget
     & $install -Target $emptyTarget -ProjectName "Empty Project"
