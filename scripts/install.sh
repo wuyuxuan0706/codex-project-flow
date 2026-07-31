@@ -118,10 +118,18 @@ done
 project_escaped=$(printf '%s' "$project_name" | sed 's/[&|\\]/\\&/g')
 project_json_inner=$(printf '%s' "$project_name" | sed 's/\\/\\\\/g; s/"/\\"/g')
 project_json_replacement=$(printf '"%s"' "$project_json_inner" | sed 's/[&|\\]/\\&/g')
+initial_project_state="$template_root/templates/PROJECT_STATE.md"
+[ -f "$initial_project_state" ] || {
+    echo "Initial project state template is missing: $initial_project_state" >&2
+    exit 3
+}
 
 install_file() {
     source_file=$1
     relative=$2
+    if [ "$relative" = "docs/PROJECT_STATE.md" ]; then
+        source_file=$initial_project_state
+    fi
     destination="$target_root/$relative"
 
     case "$relative" in

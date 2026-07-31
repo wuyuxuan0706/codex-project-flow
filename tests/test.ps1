@@ -37,9 +37,143 @@ try {
         throw "Template validation failed."
     }
 
+    $manifestPath = Join-Path $repoRoot ".codex-plugin/plugin.json"
+    $bootstrapSkillPath = Join-Path $repoRoot "skills/bootstrap-project-flow/SKILL.md"
+    $bootstrapOpenAiPath = Join-Path $repoRoot "skills/bootstrap-project-flow/agents/openai.yaml"
+    foreach ($pluginFile in @($manifestPath, $bootstrapSkillPath, $bootstrapOpenAiPath)) {
+        if (-not (Test-Path -LiteralPath $pluginFile -PathType Leaf)) {
+            throw "Plugin packaging file is missing: $pluginFile"
+        }
+    }
+
+    $manifest = Get-Content -Raw -Encoding UTF8 -LiteralPath $manifestPath | ConvertFrom-Json
+    $baseVersion = [System.IO.File]::ReadAllText((Join-Path $repoRoot "VERSION")).Trim()
+    $manifestVersionPattern = '^' + [regex]::Escape($baseVersion) +
+        '(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$'
+    if ($manifest.name -cne "codex-project-flow") {
+        throw "Plugin manifest name is inconsistent with the repository."
+    }
+    if ($manifest.version -isnot [string] -or $manifest.version -cnotmatch $manifestVersionPattern) {
+        throw "Plugin manifest version does not use VERSION as its base version."
+    }
+    if ($manifest.skills -cne "./skills/") {
+        throw "Plugin manifest skills path is not ./skills/."
+    }
+
+    $bootstrapSkillText = [System.IO.File]::ReadAllText($bootstrapSkillPath)
+    $bootstrapFrontmatter = [regex]::Match(
+        $bootstrapSkillText,
+        '\A---\r?\n(?<frontmatter>.*?)\r?\n---(?:\r?\n|\z)',
+        [System.Text.RegularExpressions.RegexOptions]::Singleline
+    )
+    if (-not $bootstrapFrontmatter.Success) {
+        throw "Bootstrap Skill frontmatter is missing or malformed."
+    }
+    $bootstrapMetadata = $bootstrapFrontmatter.Groups["frontmatter"].Value
+    if ($bootstrapMetadata -notmatch '(?m)^name:\s*bootstrap-project-flow\s*$') {
+        throw "Bootstrap Skill name is inconsistent with its directory."
+    }
+    $bootstrapDescription = [regex]::Match(
+        $bootstrapMetadata,
+        '(?m)^description:\s*(?<value>.+?)\s*$'
+    ).Groups["value"].Value
+    if (
+        $bootstrapDescription -notmatch '(?i)\b(?:install|import)\w*\b' -or
+        $bootstrapDescription -notmatch '(?i)\b(?:create|reuse)\w*\b' -or
+        $bootstrapDescription -notmatch '(?i)\buser-visible\b.*\bproject hub\b'
+    ) {
+        throw "Bootstrap Skill description does not cover import and user-visible project hub creation or reuse."
+    }
+    if ($bootstrapSkillText -notmatch [regex]::Escape('set_thread_pinned')) {
+        throw "Bootstrap Skill does not call set_thread_pinned for the permanent project hub."
+    }
+    if (
+        $bootstrapSkillText -notmatch
+            '(?i)(?:pinned[^\w\s:=]?\s*[:=]\s*\$?true\b|-pinned\s+\$?true\b)'
+    ) {
+        throw "Bootstrap Skill does not explicitly set pinned to true."
+    }
+    foreach ($toolName in @("read_thread", "set_thread_archived")) {
+        $toolUsePattern = '(?is)\b(?:call|use)\b.{0,30}\b' +
+            [regex]::Escape($toolName) + '\b'
+        if ($bootstrapSkillText -notmatch $toolUsePattern) {
+            throw "Bootstrap Skill does not use $toolName for project hub recovery."
+        }
+    }
+    if (
+        $bootstrapSkillText -notmatch
+            '(?i)(?:archived[^\w\s:=]?\s*[:=]\s*\$?false\b|-archived\s+\$?false\b)'
+    ) {
+        throw "Bootstrap Skill does not explicitly set archived to false."
+    }
+    if ($bootstrapSkillText -notmatch '(?i)\bhubKey\b') {
+        throw "Bootstrap Skill does not define the stable hubKey identifier."
+    }
+    if (
+        $bootstrapSkillText -notmatch
+            '(?is)\[codex-project-flow:hub:v1\].{0,160}\bprojectId\s*=.{1,120};\s*hubTitle\s*='
+    ) {
+        throw "Bootstrap Skill hubKey does not include the v1 prefix, projectId, and hubTitle."
+    }
+    if (
+        $bootstrapSkillText -notmatch
+            '(?is)(?:(?:full|complete).{0,30}hubKey.{0,120}(?:exact|verbatim)|(?:exact|verbatim).{0,120}(?:full|complete).{0,30}hubKey)'
+    ) {
+        throw "Bootstrap Skill does not compare the complete hubKey exactly during recovery."
+    }
+    if (
+        $bootstrapSkillText -notmatch
+            '(?im)^[^\r\n]*(?:queued|clientThreadId)[^\r\n]*(?:do not|never|not to)[^\r\n]*(?:call\s+)?[^\w\s]?create_thread[^\w\s]?\s+again[^\r\n]*$'
+    ) {
+        throw "Bootstrap Skill queued handling does not forbid another create_thread call."
+    }
+    if (
+        $bootstrapSkillText -notmatch
+            '(?im)^[^\r\n]*(?:queued|clientThreadId)[^\r\n]*(?:do not|never|not to)[^\r\n]*(?:(?:immediate(?:ly)?\s+)(?:re-?run|retry)|(?:re-?run|retry)[^\r\n]{0,40}immediate)[^\r\n]*$'
+    ) {
+        throw "Bootstrap Skill queued handling does not forbid an immediate rerun or retry."
+    }
+    $bootstrapOpenAiText = [System.IO.File]::ReadAllText($bootstrapOpenAiPath)
+    $bootstrapDefaultPrompt = [regex]::Match(
+        $bootstrapOpenAiText,
+        '(?m)^\s+default_prompt:\s*(?<value>.+?)\s*$'
+    ).Groups["value"].Value
+    if ($bootstrapDefaultPrompt -notmatch [regex]::Escape('$bootstrap-project-flow')) {
+        throw "Bootstrap openai.yaml default_prompt does not reference `$bootstrap-project-flow."
+    }
+
+    $stateTemplatePath = Join-Path $repoRoot "templates/PROJECT_STATE.md"
+    $sourceStatePath = Join-Path $repoRoot "docs/PROJECT_STATE.md"
+    if (-not (Test-Path -LiteralPath $stateTemplatePath -PathType Leaf)) {
+        throw "Project-state installation template is missing."
+    }
+    $stateTemplateText = [System.IO.File]::ReadAllText($stateTemplatePath)
+    $sourceStateText = [System.IO.File]::ReadAllText($sourceStatePath)
+    if ($stateTemplateText -ceq $sourceStateText) {
+        throw "Repository project state must remain distinct from the blank installation template."
+    }
+
     & $install -Target $emptyTarget -ProjectName $specialProjectName
     if ($LASTEXITCODE -ne 0) {
         throw "Empty-project installation failed."
+    }
+    $installedStateText = [System.IO.File]::ReadAllText(
+        (Join-Path $emptyTarget "docs/PROJECT_STATE.md")
+    )
+    if ($installedStateText -cne $stateTemplateText) {
+        throw "Installer did not source docs/PROJECT_STATE.md from the blank installation template."
+    }
+    if ($installedStateText -ceq $sourceStateText) {
+        throw "Installer copied the repository's live project state into the target project."
+    }
+    foreach ($pluginOnlyPath in @(".codex-plugin", "skills")) {
+        if (Test-Path -LiteralPath (Join-Path $emptyTarget $pluginOnlyPath)) {
+            throw "Installer copied plugin-only path into the target project: $pluginOnlyPath"
+        }
+    }
+    & $validate -Target $emptyTarget
+    if ($LASTEXITCODE -ne 0) {
+        throw "Installed-project validation incorrectly required plugin packaging files."
     }
     $config = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $emptyTarget ".agents/workflow.json") |
         ConvertFrom-Json
@@ -121,6 +255,43 @@ try {
     & $validate -Target $emptyTarget
     if ($LASTEXITCODE -eq 0) {
         throw "Validator accepted a non-string handoff_policy.only_when entry."
+    }
+    $invalidTaskPolicyCases = @(
+        @{
+            Name = "an incorrect max_active_tasks_applies_to"
+            Mutate = {
+                param($Workflow)
+                $Workflow.task_policy.max_active_tasks_applies_to = "all_user_visible_tasks"
+            }
+        },
+        @{
+            Name = "an incorrect project_hub_task_lifecycle"
+            Mutate = {
+                param($Workflow)
+                $Workflow.task_policy.project_hub_task_lifecycle = "ephemeral"
+            }
+        },
+        @{
+            Name = "project_hub_occupies_active_task_slot set to true"
+            Mutate = {
+                param($Workflow)
+                $Workflow.task_policy.project_hub_occupies_active_task_slot = $true
+            }
+        }
+    )
+    foreach ($invalidCase in $invalidTaskPolicyCases) {
+        $invalidConfig = $validConfigText | ConvertFrom-Json
+        $mutate = $invalidCase.Mutate
+        & $mutate $invalidConfig
+        [System.IO.File]::WriteAllText(
+            (Join-Path $emptyTarget ".agents/workflow.json"),
+            ($invalidConfig | ConvertTo-Json -Depth 20),
+            $utf8NoBom
+        )
+        & $validate -Target $emptyTarget
+        if ($LASTEXITCODE -eq 0) {
+            throw "Validator accepted $($invalidCase.Name)."
+        }
     }
     [System.IO.File]::WriteAllText(
         (Join-Path $emptyTarget ".agents/workflow.json"),

@@ -29,7 +29,130 @@ mkdir -p \
     "$outside_target"
 
 ALLOW_PLACEHOLDERS=1 sh "$repo_root/scripts/validate.sh" "$repo_root"
+
+plugin_manifest="$repo_root/.codex-plugin/plugin.json"
+bootstrap_skill="$repo_root/skills/bootstrap-project-flow/SKILL.md"
+bootstrap_openai_yaml="$repo_root/skills/bootstrap-project-flow/agents/openai.yaml"
+for plugin_file in "$plugin_manifest" "$bootstrap_skill" "$bootstrap_openai_yaml"; do
+    [ -f "$plugin_file" ] || {
+        echo "Plugin packaging file is missing: $plugin_file" >&2
+        exit 1
+    }
+done
+
+base_version=$(sed -n '1{s/[[:space:]]*$//;p;}' "$repo_root/VERSION")
+plugin_name=$(sed -n 's/^[[:space:]]*"name"[[:space:]]*:[[:space:]]*"\([^"]*\)"[[:space:]]*,\{0,1\}[[:space:]]*$/\1/p' "$plugin_manifest" | head -n 1)
+[ "$plugin_name" = "codex-project-flow" ] || {
+    echo "Plugin manifest name is inconsistent with the repository." >&2
+    exit 1
+}
+plugin_version=$(sed -n 's/^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)"[[:space:]]*,\{0,1\}[[:space:]]*$/\1/p' "$plugin_manifest" | head -n 1)
+if [ "$plugin_version" != "$base_version" ]; then
+    build_version=${plugin_version#"$base_version"+}
+    if [ "$build_version" = "$plugin_version" ] ||
+        ! printf '%s\n' "$build_version" | grep -Eq '^[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*$'; then
+        echo "Plugin manifest version does not use VERSION as its base version." >&2
+        exit 1
+    fi
+fi
+plugin_skills=$(sed -n 's/^[[:space:]]*"skills"[[:space:]]*:[[:space:]]*"\([^"]*\)"[[:space:]]*,\{0,1\}[[:space:]]*$/\1/p' "$plugin_manifest" | head -n 1)
+[ "$plugin_skills" = "./skills/" ] || {
+    echo "Plugin manifest skills path is not ./skills/." >&2
+    exit 1
+}
+
+grep -Eq '^name:[[:space:]]*bootstrap-project-flow[[:space:]]*$' "$bootstrap_skill" || {
+    echo "Bootstrap Skill name is inconsistent with its directory." >&2
+    exit 1
+}
+bootstrap_description=$(sed -n '2,/^---[[:space:]]*$/ { s/^description:[[:space:]]*//p; }' "$bootstrap_skill" | head -n 1)
+printf '%s\n' "$bootstrap_description" | grep -Eiq '(install|import)' &&
+    printf '%s\n' "$bootstrap_description" | grep -Eiq '(create|reuse)' &&
+    printf '%s\n' "$bootstrap_description" | grep -Eiq 'user-visible.*project hub' || {
+        echo "Bootstrap Skill description does not cover import and user-visible project hub creation or reuse." >&2
+        exit 1
+    }
+grep -Fq 'set_thread_pinned' "$bootstrap_skill" || {
+    echo "Bootstrap Skill does not call set_thread_pinned for the permanent project hub." >&2
+    exit 1
+}
+grep -Eiq '(pinned[^[:alnum:]_[:space:]:=]?[[:space:]]*[:=][[:space:]]*\$?true|-pinned[[:space:]]+\$?true)' "$bootstrap_skill" || {
+    echo "Bootstrap Skill does not explicitly set pinned to true." >&2
+    exit 1
+}
+bootstrap_skill_flat=$(tr '\n' ' ' < "$bootstrap_skill")
+for tool_name in read_thread set_thread_archived; do
+    printf '%s\n' "$bootstrap_skill_flat" |
+        grep -Eiq "(call|use).{0,30}$tool_name" || {
+        echo "Bootstrap Skill does not use $tool_name for project hub recovery." >&2
+        exit 1
+    }
+done
+grep -Eiq '(archived[^[:alnum:]_[:space:]:=]?[[:space:]]*[:=][[:space:]]*\$?false|-archived[[:space:]]+\$?false)' "$bootstrap_skill" || {
+    echo "Bootstrap Skill does not explicitly set archived to false." >&2
+    exit 1
+}
+grep -Eiq '(^|[^[:alnum:]_])hubKey([^[:alnum:]_]|$)' "$bootstrap_skill" || {
+    echo "Bootstrap Skill does not define the stable hubKey identifier." >&2
+    exit 1
+}
+printf '%s\n' "$bootstrap_skill_flat" |
+    grep -Eiq '\[codex-project-flow:hub:v1\].{0,160}projectId[[:space:]]*=.{1,120};[[:space:]]*hubTitle[[:space:]]*=' || {
+        echo "Bootstrap Skill hubKey does not include the v1 prefix, projectId, and hubTitle." >&2
+        exit 1
+    }
+printf '%s\n' "$bootstrap_skill_flat" |
+    grep -Eiq '((full|complete).{0,30}hubKey.{0,120}(exact|verbatim)|(exact|verbatim).{0,120}(full|complete).{0,30}hubKey)' || {
+        echo "Bootstrap Skill does not compare the complete hubKey exactly during recovery." >&2
+        exit 1
+    }
+grep -Eiq '(queued|clientThreadId).*(do not|never|not to).*(call[[:space:]]+)?[^[:alnum:]_[:space:]]?create_thread[^[:alnum:]_[:space:]]?[[:space:]]+again' "$bootstrap_skill" || {
+        echo "Bootstrap Skill queued handling does not forbid another create_thread call." >&2
+        exit 1
+    }
+grep -Eiq '(queued|clientThreadId).*(do not|never|not to).*(immediate(ly)?[[:space:]]+(re-?run|retry)|(re-?run|retry).{0,40}immediate)' "$bootstrap_skill" || {
+        echo "Bootstrap Skill queued handling does not forbid an immediate rerun or retry." >&2
+        exit 1
+    }
+bootstrap_default_prompt=$(sed -n 's/^[[:space:]][[:space:]]*default_prompt:[[:space:]]*//p' "$bootstrap_openai_yaml" | head -n 1)
+printf '%s\n' "$bootstrap_default_prompt" | grep -Fq '$bootstrap-project-flow' || {
+    echo 'Bootstrap openai.yaml default_prompt does not reference $bootstrap-project-flow.' >&2
+    exit 1
+}
+
+state_template="$repo_root/templates/PROJECT_STATE.md"
+source_state="$repo_root/docs/PROJECT_STATE.md"
+[ -f "$state_template" ] || {
+    echo "Project-state installation template is missing." >&2
+    exit 1
+}
+if cmp -s "$state_template" "$source_state"; then
+    echo "Repository project state must remain distinct from the blank installation template." >&2
+    exit 1
+fi
+
 sh "$repo_root/scripts/install.sh" "$empty_target" "$special_project_name"
+
+installed_state="$empty_target/docs/PROJECT_STATE.md"
+cmp -s "$installed_state" "$state_template" || {
+    echo "Installer did not source docs/PROJECT_STATE.md from the blank installation template." >&2
+    exit 1
+}
+if cmp -s "$installed_state" "$source_state"; then
+    echo "Installer copied the repository's live project state into the target project." >&2
+    exit 1
+fi
+
+for plugin_only_path in .codex-plugin skills; do
+    [ ! -e "$empty_target/$plugin_only_path" ] || {
+        echo "Installer copied plugin-only path into the target project: $plugin_only_path" >&2
+        exit 1
+    }
+done
+sh "$repo_root/scripts/validate.sh" "$empty_target" || {
+    echo "Installed-project validation incorrectly required plugin packaging files." >&2
+    exit 1
+}
 
 grep -Fq '"name": "Quote \"value\" Backslash \\ Ampersand & Pipe |"' "$empty_target/.agents/workflow.json" || {
     echo "JSON project name rendering failed for special characters." >&2
@@ -73,6 +196,24 @@ printf '%s\n' "$valid_config" |
     sed 's/"user_requested"/"user_requested", false/' > "$empty_target/.agents/workflow.json"
 if sh "$repo_root/scripts/validate.sh" "$empty_target"; then
     echo "Validator accepted a non-string handoff_policy.only_when entry." >&2
+    exit 1
+fi
+printf '%s\n' "$valid_config" |
+    sed 's/"max_active_tasks_applies_to": "subsequent_user_visible_execution_tasks"/"max_active_tasks_applies_to": "all_user_visible_tasks"/' > "$empty_target/.agents/workflow.json"
+if sh "$repo_root/scripts/validate.sh" "$empty_target"; then
+    echo "Validator accepted an incorrect max_active_tasks_applies_to." >&2
+    exit 1
+fi
+printf '%s\n' "$valid_config" |
+    sed 's/"project_hub_task_lifecycle": "persistent"/"project_hub_task_lifecycle": "ephemeral"/' > "$empty_target/.agents/workflow.json"
+if sh "$repo_root/scripts/validate.sh" "$empty_target"; then
+    echo "Validator accepted an incorrect project_hub_task_lifecycle." >&2
+    exit 1
+fi
+printf '%s\n' "$valid_config" |
+    sed 's/"project_hub_occupies_active_task_slot": false/"project_hub_occupies_active_task_slot": true/' > "$empty_target/.agents/workflow.json"
+if sh "$repo_root/scripts/validate.sh" "$empty_target"; then
+    echo "Validator accepted project_hub_occupies_active_task_slot set to true." >&2
     exit 1
 fi
 printf '%s\n' "$valid_config" > "$empty_target/.agents/workflow.json"

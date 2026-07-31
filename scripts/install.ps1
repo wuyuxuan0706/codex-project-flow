@@ -130,6 +130,11 @@ function Install-TemplateFile([string]$Source, [string]$RelativePath) {
     Write-Host "WRITE $RelativePath"
 }
 
+$initialProjectState = Join-Path $templateRoot "templates/PROJECT_STATE.md"
+if (-not (Test-Path -LiteralPath $initialProjectState -PathType Leaf)) {
+    throw "Initial project state template is missing: $initialProjectState"
+}
+
 $templateFiles = New-Object System.Collections.Generic.List[object]
 $templateFiles.Add([pscustomobject]@{
     Source = Join-Path $templateRoot "AGENTS.md"
@@ -140,8 +145,13 @@ foreach ($rootName in @(".agents", "docs")) {
     $sourceBase = Join-Path $templateRoot $rootName
     Get-ChildItem -LiteralPath $sourceBase -Recurse -File | Sort-Object FullName | ForEach-Object {
         $relative = $_.FullName.Substring($templateRoot.Length).TrimStart('\', '/')
+        $source = if ($relative.Replace('\', '/') -eq "docs/PROJECT_STATE.md") {
+            $initialProjectState
+        } else {
+            $_.FullName
+        }
         $templateFiles.Add([pscustomobject]@{
-            Source = $_.FullName
+            Source = $source
             Relative = $relative
         })
     }

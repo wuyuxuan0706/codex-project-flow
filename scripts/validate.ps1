@@ -68,7 +68,14 @@ $requiredFiles = @(
     "docs/WORKFLOW_GUIDE.md"
 )
 if ($AllowPlaceholders) {
-    $requiredFiles += @("README.md", "VERSION")
+    $requiredFiles += @(
+        "README.md",
+        "VERSION",
+        "templates/PROJECT_STATE.md",
+        ".codex-plugin/plugin.json",
+        "skills/bootstrap-project-flow/SKILL.md",
+        "skills/bootstrap-project-flow/agents/openai.yaml"
+    )
 }
 foreach ($relative in $requiredFiles) {
     $path = Resolve-InTarget $relative
@@ -227,6 +234,25 @@ if ($configParsed -and $configIsObject) {
         ) {
             Add-Error "task_policy.blocked_or_waiting_occupies_slot must be true."
         }
+        if (
+            $config.task_policy.max_active_tasks_applies_to -isnot [string] -or
+            $config.task_policy.max_active_tasks_applies_to -cne
+                "subsequent_user_visible_execution_tasks"
+        ) {
+            Add-Error "task_policy.max_active_tasks_applies_to must be subsequent_user_visible_execution_tasks."
+        }
+        if (
+            $config.task_policy.project_hub_task_lifecycle -isnot [string] -or
+            $config.task_policy.project_hub_task_lifecycle -cne "persistent"
+        ) {
+            Add-Error "task_policy.project_hub_task_lifecycle must be persistent."
+        }
+        if (
+            $config.task_policy.project_hub_occupies_active_task_slot -isnot [bool] -or
+            $config.task_policy.project_hub_occupies_active_task_slot
+        ) {
+            Add-Error "task_policy.project_hub_occupies_active_task_slot must be false."
+        }
         if ($config.task_policy.return_to_work_on_change -isnot [System.Array]) {
             Add-Error "task_policy.return_to_work_on_change must be a JSON array."
         } else {
@@ -279,6 +305,162 @@ if ($configParsed -and $configIsObject) {
             if ($config.handoff_policy.only_when -cnotcontains $requiredValue) {
                 Add-Error "handoff_policy.only_when is missing: $requiredValue"
             }
+        }
+    }
+}
+
+if ($AllowPlaceholders) {
+    $versionPath = Join-Path $targetRoot "VERSION"
+    $pluginPath = Join-Path $targetRoot ".codex-plugin/plugin.json"
+    if (
+        (Test-Path -LiteralPath $versionPath -PathType Leaf) -and
+        (Test-Path -LiteralPath $pluginPath -PathType Leaf)
+    ) {
+        $templateVersion = [System.IO.File]::ReadAllText($versionPath).Trim()
+        if ($templateVersion -notmatch '^\d+\.\d+\.\d+$') {
+            Add-Error "VERSION must contain a strict semantic version."
+        }
+        try {
+            $plugin = Get-Content -Raw -Encoding UTF8 -LiteralPath $pluginPath | ConvertFrom-Json
+            if (
+                $null -eq $plugin -or
+                $plugin.GetType().FullName -ne "System.Management.Automation.PSCustomObject"
+            ) {
+                Add-Error "The JSON root in .codex-plugin/plugin.json must be an object."
+            } else {
+                if ($plugin.name -isnot [string] -or $plugin.name -cne "codex-project-flow") {
+                    Add-Error "Plugin manifest name must be codex-project-flow."
+                }
+                $versionPattern = '^' + [regex]::Escape($templateVersion) +
+                    '(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$'
+                if ($plugin.version -isnot [string] -or $plugin.version -cnotmatch $versionPattern) {
+                    Add-Error "Plugin manifest version must use VERSION as its base version."
+                }
+                if ($plugin.description -isnot [string] -or [string]::IsNullOrWhiteSpace($plugin.description)) {
+                    Add-Error "Plugin manifest description must be non-empty."
+                }
+                if ($plugin.skills -isnot [string] -or $plugin.skills -cne "./skills/") {
+                    Add-Error "Plugin manifest skills must be ./skills/."
+                }
+            }
+        } catch {
+            Add-Error "Invalid JSON in .codex-plugin/plugin.json: $($_.Exception.Message)"
+        }
+    }
+
+    $bootstrapSkillPath = Join-Path $targetRoot "skills/bootstrap-project-flow/SKILL.md"
+    if (Test-Path -LiteralPath $bootstrapSkillPath -PathType Leaf) {
+        $bootstrapSkillText = [System.IO.File]::ReadAllText($bootstrapSkillPath)
+        $bootstrapFrontmatterMatch = [regex]::Match(
+            $bootstrapSkillText,
+            '\A---\r?\n(?<frontmatter>.*?)\r?\n---(?:\r?\n|\z)',
+            [System.Text.RegularExpressions.RegexOptions]::Singleline
+        )
+        if (-not $bootstrapFrontmatterMatch.Success) {
+            Add-Error "Bootstrap Skill frontmatter is missing or malformed."
+        } else {
+            $bootstrapFrontmatter = $bootstrapFrontmatterMatch.Groups["frontmatter"].Value
+            if ($bootstrapFrontmatter -notmatch '(?m)^name:\s*bootstrap-project-flow\s*$') {
+                Add-Error "Bootstrap Skill frontmatter name must be bootstrap-project-flow."
+            }
+            $bootstrapDescriptionMatch = [regex]::Match(
+                $bootstrapFrontmatter,
+                '(?m)^description:\s*(?<value>.+?)\s*$'
+            )
+            if (
+                -not $bootstrapDescriptionMatch.Success -or
+                $bootstrapDescriptionMatch.Groups["value"].Value -in @('', '""', "''")
+            ) {
+                Add-Error "Bootstrap Skill frontmatter description must be non-empty."
+            } else {
+                $bootstrapDescription = $bootstrapDescriptionMatch.Groups["value"].Value
+                if ($bootstrapDescription -notmatch '(?i)\b(?:install|import)\w*\b') {
+                    Add-Error "Bootstrap Skill description must cover installing or importing the workflow."
+                }
+                if ($bootstrapDescription -notmatch '(?i)\b(?:create|reuse)\w*\b') {
+                    Add-Error "Bootstrap Skill description must cover creating or reusing the project hub task."
+                }
+                if ($bootstrapDescription -notmatch '(?i)\buser-visible\b.*\bproject hub\b') {
+                    Add-Error "Bootstrap Skill description must identify a user-visible project hub task."
+                }
+            }
+            if ($bootstrapSkillText -notmatch [regex]::Escape('set_thread_pinned')) {
+                Add-Error "Bootstrap Skill must call set_thread_pinned for a permanent project hub."
+            }
+            if (
+                $bootstrapSkillText -notmatch
+                    '(?i)(?:pinned[^\w\s:=]?\s*[:=]\s*\$?true\b|-pinned\s+\$?true\b)'
+            ) {
+                Add-Error "Bootstrap Skill must explicitly set pinned to true."
+            }
+            foreach ($toolName in @("read_thread", "set_thread_archived")) {
+                $toolUsePattern = '(?is)\b(?:call|use)\b.{0,30}\b' +
+                    [regex]::Escape($toolName) + '\b'
+                if ($bootstrapSkillText -notmatch $toolUsePattern) {
+                    Add-Error "Bootstrap Skill must use $toolName for project hub recovery."
+                }
+            }
+            if (
+                $bootstrapSkillText -notmatch
+                    '(?i)(?:archived[^\w\s:=]?\s*[:=]\s*\$?false\b|-archived\s+\$?false\b)'
+            ) {
+                Add-Error "Bootstrap Skill must explicitly set archived to false."
+            }
+            if ($bootstrapSkillText -notmatch '(?i)\bhubKey\b') {
+                Add-Error "Bootstrap Skill must define the stable hubKey identifier."
+            }
+            if (
+                $bootstrapSkillText -notmatch
+                    '(?is)\[codex-project-flow:hub:v1\].{0,160}\bprojectId\s*=.{1,120};\s*hubTitle\s*='
+            ) {
+                Add-Error "Bootstrap Skill hubKey must use the v1 prefix, projectId, and hubTitle."
+            }
+            if (
+                $bootstrapSkillText -notmatch
+                    '(?is)(?:(?:full|complete).{0,30}hubKey.{0,120}(?:exact|verbatim)|(?:exact|verbatim).{0,120}(?:full|complete).{0,30}hubKey)'
+            ) {
+                Add-Error "Bootstrap Skill recovery must compare the complete hubKey exactly."
+            }
+            if (
+                $bootstrapSkillText -notmatch
+                    '(?im)^[^\r\n]*(?:queued|clientThreadId)[^\r\n]*(?:do not|never|not to)[^\r\n]*(?:call\s+)?[^\w\s]?create_thread[^\w\s]?\s+again[^\r\n]*$'
+            ) {
+                Add-Error "Bootstrap Skill queued handling must forbid another create_thread call."
+            }
+            if (
+                $bootstrapSkillText -notmatch
+                    '(?im)^[^\r\n]*(?:queued|clientThreadId)[^\r\n]*(?:do not|never|not to)[^\r\n]*(?:(?:immediate(?:ly)?\s+)(?:re-?run|retry)|(?:re-?run|retry)[^\r\n]{0,40}immediate)[^\r\n]*$'
+            ) {
+                Add-Error "Bootstrap Skill queued handling must forbid an immediate rerun or retry."
+            }
+        }
+    }
+
+    $bootstrapOpenAiPath = Join-Path $targetRoot "skills/bootstrap-project-flow/agents/openai.yaml"
+    if (Test-Path -LiteralPath $bootstrapOpenAiPath -PathType Leaf) {
+        $bootstrapOpenAiText = [System.IO.File]::ReadAllText($bootstrapOpenAiPath)
+        if ($bootstrapOpenAiText -notmatch '(?m)^interface:\s*(?:#.*)?$') {
+            Add-Error "Bootstrap openai.yaml is missing the interface mapping."
+        }
+        foreach ($field in @("display_name", "short_description", "default_prompt")) {
+            $fieldMatch = [regex]::Match(
+                $bootstrapOpenAiText,
+                "(?m)^\s+$field`:\s*(?<value>.+?)\s*$"
+            )
+            if (-not $fieldMatch.Success -or $fieldMatch.Groups["value"].Value -in @('', '""', "''")) {
+                Add-Error "Bootstrap openai.yaml is missing a non-empty interface.$field."
+            }
+        }
+        $defaultPromptMatch = [regex]::Match(
+            $bootstrapOpenAiText,
+            '(?m)^\s+default_prompt:\s*(?<value>.+?)\s*$'
+        )
+        if (
+            -not $defaultPromptMatch.Success -or
+            $defaultPromptMatch.Groups["value"].Value -notmatch
+                [regex]::Escape('$bootstrap-project-flow')
+        ) {
+            Add-Error "Bootstrap openai.yaml default_prompt must reference `$bootstrap-project-flow."
         }
     }
 }

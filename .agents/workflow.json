@@ -26,6 +26,9 @@
   },
   "task_policy": {
     "max_active_tasks": 1,
+    "max_active_tasks_applies_to": "subsequent_user_visible_execution_tasks",
+    "project_hub_task_lifecycle": "persistent",
+    "project_hub_occupies_active_task_slot": false,
     "blocked_or_waiting_occupies_slot": true,
     "return_to_work_on_change": [
       "scope",

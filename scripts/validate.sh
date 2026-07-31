@@ -59,6 +59,10 @@ done
 if [ "$allow_placeholders" -eq 1 ]; then
     require_file "README.md"
     require_file "VERSION"
+    require_file "templates/PROJECT_STATE.md"
+    require_file ".codex-plugin/plugin.json"
+    require_file "skills/bootstrap-project-flow/SKILL.md"
+    require_file "skills/bootstrap-project-flow/agents/openai.yaml"
 fi
 
 for prefix in 00 08; do
@@ -281,6 +285,10 @@ if [ -f "$config" ]; then
                     else print "CONFIG_PATH:project_state:" string_value
                 } else if (context == "/work/mode") {
                     print ((string_value == "read_only") ? "WORK_MODE:ok" : "WORK_MODE:other")
+                } else if (context == "/task_policy/max_active_tasks_applies_to") {
+                    print ((string_value == "subsequent_user_visible_execution_tasks") ? "MAX_ACTIVE_TASKS_APPLIES_TO:ok" : "MAX_ACTIVE_TASKS_APPLIES_TO:other")
+                } else if (context == "/task_policy/project_hub_task_lifecycle") {
+                    print ((string_value == "persistent") ? "PROJECT_HUB_TASK_LIFECYCLE:ok" : "PROJECT_HUB_TASK_LIFECYCLE:other")
                 } else if (context == "/authorization/modify") {
                     print ((string_value == "separate") ? "AUTH:modify:ok" : "AUTH:modify:other")
                 } else if (context == "/authorization/check") {
@@ -327,6 +335,8 @@ if [ -f "$config" ]; then
             if (literal == "true") {
                 if (context == "/task_policy/blocked_or_waiting_occupies_slot") {
                     print "BLOCKED_WAITING:ok"
+                } else if (context == "/task_policy/project_hub_occupies_active_task_slot") {
+                    print "PROJECT_HUB_OCCUPIES_ACTIVE_TASK_SLOT:other"
                 }
                 pos += 4
                 return 1
@@ -338,6 +348,8 @@ if [ -f "$config" ]; then
             if (substr(text, pos, 5) == "false") {
                 if (context == "/task_policy/blocked_or_waiting_occupies_slot") {
                     print "BLOCKED_WAITING:other"
+                } else if (context == "/task_policy/project_hub_occupies_active_task_slot") {
+                    print "PROJECT_HUB_OCCUPIES_ACTIVE_TASK_SLOT:ok"
                 }
                 pos += 5
                 return 1
@@ -423,6 +435,12 @@ if [ "$json_valid" -eq 1 ]; then
     done
     meta_has 'MAX_ACTIVE_TASKS:ok' || error "task_policy.max_active_tasks must be the number 1."
     meta_has 'BLOCKED_WAITING:ok' || error "task_policy.blocked_or_waiting_occupies_slot must be true."
+    meta_has 'MAX_ACTIVE_TASKS_APPLIES_TO:ok' ||
+        error "task_policy.max_active_tasks_applies_to must be subsequent_user_visible_execution_tasks."
+    meta_has 'PROJECT_HUB_TASK_LIFECYCLE:ok' ||
+        error "task_policy.project_hub_task_lifecycle must be persistent."
+    meta_has 'PROJECT_HUB_OCCUPIES_ACTIVE_TASK_SLOT:ok' ||
+        error "task_policy.project_hub_occupies_active_task_slot must be false."
     if ! meta_has 'RETURN_ARRAY'; then
         error "task_policy.return_to_work_on_change must be a JSON array."
     elif meta_has 'RETURN_INVALID'; then
@@ -445,6 +463,99 @@ if [ "$json_valid" -eq 1 ]; then
             meta_has "HANDOFF_ITEM:$required_value" ||
                 error "handoff_policy.only_when is missing: $required_value"
         done
+    fi
+fi
+
+if [ "$allow_placeholders" -eq 1 ]; then
+    version_file="$target_root/VERSION"
+    plugin_manifest="$target_root/.codex-plugin/plugin.json"
+    if [ -f "$version_file" ] && [ -f "$plugin_manifest" ]; then
+        template_version=$(sed -n '1{s/[[:space:]]*$//;p;}' "$version_file")
+        printf '%s\n' "$template_version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' ||
+            error "VERSION must contain a strict semantic version."
+
+        plugin_name=$(sed -n 's/^[[:space:]]*"name"[[:space:]]*:[[:space:]]*"\([^"]*\)"[[:space:]]*,\{0,1\}[[:space:]]*$/\1/p' "$plugin_manifest" | head -n 1)
+        [ "$plugin_name" = "codex-project-flow" ] ||
+            error "Plugin manifest name must be codex-project-flow."
+
+        plugin_version=$(sed -n 's/^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)"[[:space:]]*,\{0,1\}[[:space:]]*$/\1/p' "$plugin_manifest" | head -n 1)
+        if [ "$plugin_version" != "$template_version" ]; then
+            build_version=${plugin_version#"$template_version"+}
+            if [ "$build_version" = "$plugin_version" ] ||
+                ! printf '%s\n' "$build_version" | grep -Eq '^[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*$'; then
+                error "Plugin manifest version must use VERSION as its base version."
+            fi
+        fi
+
+        plugin_description=$(sed -n 's/^[[:space:]]*"description"[[:space:]]*:[[:space:]]*"\([^"]*\)"[[:space:]]*,\{0,1\}[[:space:]]*$/\1/p' "$plugin_manifest" | head -n 1)
+        [ -n "$plugin_description" ] || error "Plugin manifest description must be non-empty."
+
+        plugin_skills=$(sed -n 's/^[[:space:]]*"skills"[[:space:]]*:[[:space:]]*"\([^"]*\)"[[:space:]]*,\{0,1\}[[:space:]]*$/\1/p' "$plugin_manifest" | head -n 1)
+        [ "$plugin_skills" = "./skills/" ] || error "Plugin manifest skills must be ./skills/."
+    fi
+
+    bootstrap_skill="$target_root/skills/bootstrap-project-flow/SKILL.md"
+    if [ -f "$bootstrap_skill" ]; then
+        first=$(sed -n '1p' "$bootstrap_skill")
+        closing=$(sed -n '2,/^---[[:space:]]*$/ { /^---[[:space:]]*$/ { =; q; } }' "$bootstrap_skill")
+        [ "$first" = "---" ] && [ -n "$closing" ] ||
+            error "Bootstrap Skill frontmatter is missing or malformed."
+        if [ -n "$closing" ]; then
+            frontmatter=$(sed -n "2,$((closing - 1))p" "$bootstrap_skill")
+            printf '%s\n' "$frontmatter" | grep -Eq '^name:[[:space:]]*bootstrap-project-flow[[:space:]]*$' ||
+                error "Bootstrap Skill frontmatter name must be bootstrap-project-flow."
+            description=$(printf '%s\n' "$frontmatter" | sed -n 's/^description:[[:space:]]*//p' | head -n 1)
+            case "$description" in
+                ""|'""'|"''") error "Bootstrap Skill frontmatter description must be non-empty." ;;
+                *)
+                    printf '%s\n' "$description" | grep -Eiq '(install|import)' ||
+                        error "Bootstrap Skill description must cover installing or importing the workflow."
+                    printf '%s\n' "$description" | grep -Eiq '(create|reuse)' ||
+                        error "Bootstrap Skill description must cover creating or reusing the project hub task."
+                    printf '%s\n' "$description" | grep -Eiq 'user-visible.*project hub' ||
+                        error "Bootstrap Skill description must identify a user-visible project hub task."
+                    ;;
+            esac
+            grep -Fq 'set_thread_pinned' "$bootstrap_skill" ||
+                error "Bootstrap Skill must call set_thread_pinned for a permanent project hub."
+            grep -Eiq '(pinned[^[:alnum:]_[:space:]:=]?[[:space:]]*[:=][[:space:]]*\$?true|-pinned[[:space:]]+\$?true)' "$bootstrap_skill" ||
+                error "Bootstrap Skill must explicitly set pinned to true."
+            bootstrap_skill_flat=$(tr '\n' ' ' < "$bootstrap_skill")
+            for tool_name in read_thread set_thread_archived; do
+                printf '%s\n' "$bootstrap_skill_flat" |
+                    grep -Eiq "(call|use).{0,30}$tool_name" ||
+                    error "Bootstrap Skill must use $tool_name for project hub recovery."
+            done
+            grep -Eiq '(archived[^[:alnum:]_[:space:]:=]?[[:space:]]*[:=][[:space:]]*\$?false|-archived[[:space:]]+\$?false)' "$bootstrap_skill" ||
+                error "Bootstrap Skill must explicitly set archived to false."
+            grep -Eiq '(^|[^[:alnum:]_])hubKey([^[:alnum:]_]|$)' "$bootstrap_skill" ||
+                error "Bootstrap Skill must define the stable hubKey identifier."
+            printf '%s\n' "$bootstrap_skill_flat" |
+                grep -Eiq '\[codex-project-flow:hub:v1\].{0,160}projectId[[:space:]]*=.{1,120};[[:space:]]*hubTitle[[:space:]]*=' ||
+                error "Bootstrap Skill hubKey must use the v1 prefix, projectId, and hubTitle."
+            printf '%s\n' "$bootstrap_skill_flat" |
+                grep -Eiq '((full|complete).{0,30}hubKey.{0,120}(exact|verbatim)|(exact|verbatim).{0,120}(full|complete).{0,30}hubKey)' ||
+                error "Bootstrap Skill recovery must compare the complete hubKey exactly."
+            grep -Eiq '(queued|clientThreadId).*(do not|never|not to).*(call[[:space:]]+)?[^[:alnum:]_[:space:]]?create_thread[^[:alnum:]_[:space:]]?[[:space:]]+again' "$bootstrap_skill" ||
+                error "Bootstrap Skill queued handling must forbid another create_thread call."
+            grep -Eiq '(queued|clientThreadId).*(do not|never|not to).*(immediate(ly)?[[:space:]]+(re-?run|retry)|(re-?run|retry).{0,40}immediate)' "$bootstrap_skill" ||
+                error "Bootstrap Skill queued handling must forbid an immediate rerun or retry."
+        fi
+    fi
+
+    bootstrap_openai_yaml="$target_root/skills/bootstrap-project-flow/agents/openai.yaml"
+    if [ -f "$bootstrap_openai_yaml" ]; then
+        grep -Eq '^interface:[[:space:]]*(#.*)?$' "$bootstrap_openai_yaml" ||
+            error "Bootstrap openai.yaml is missing the interface mapping."
+        for field in display_name short_description default_prompt; do
+            value=$(sed -n "s/^[[:space:]][[:space:]]*$field:[[:space:]]*//p" "$bootstrap_openai_yaml" | head -n 1)
+            case "$value" in
+                ""|'""'|"''") error "Bootstrap openai.yaml is missing a non-empty interface.$field." ;;
+            esac
+        done
+        bootstrap_default_prompt=$(sed -n 's/^[[:space:]][[:space:]]*default_prompt:[[:space:]]*//p' "$bootstrap_openai_yaml" | head -n 1)
+        printf '%s\n' "$bootstrap_default_prompt" | grep -Fq '$bootstrap-project-flow' ||
+            error 'Bootstrap openai.yaml default_prompt must reference $bootstrap-project-flow.'
     fi
 fi
 
