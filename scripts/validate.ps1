@@ -16,8 +16,25 @@ if (-not (Test-Path -LiteralPath $targetRoot -PathType Container)) {
 
 function Add-Error([string]$Message) { $script:errors.Add($Message) }
 function Add-Warning([string]$Message) { $script:warnings.Add($Message) }
+function Report-LegacyPath([string]$Message) {
+    if ($AllowPlaceholders) {
+        Add-Error $Message
+    } else {
+        Add-Warning $Message
+    }
+}
+
 function Resolve-InTarget([string]$RelativePath) {
-    $full = [System.IO.Path]::GetFullPath((Join-Path $targetRoot $RelativePath))
+    if ([string]::IsNullOrWhiteSpace($RelativePath) -or [System.IO.Path]::IsPathRooted($RelativePath)) {
+        Add-Error "Configured path is not a relative path: $RelativePath"
+        return $null
+    }
+    try {
+        $full = [System.IO.Path]::GetFullPath((Join-Path $targetRoot $RelativePath))
+    } catch {
+        Add-Error "Configured path is invalid: $RelativePath"
+        return $null
+    }
     $prefix = $targetRoot.TrimEnd('\', '/') + [System.IO.Path]::DirectorySeparatorChar
     if (($full -ne $targetRoot) -and (-not $full.StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase))) {
         Add-Error "Configured path escapes target: $RelativePath"
@@ -26,88 +43,323 @@ function Resolve-InTarget([string]$RelativePath) {
     return $full
 }
 
+function Test-JsonNumberEqualOne([object]$Value) {
+    $isNumber = (
+        $Value -is [byte] -or $Value -is [sbyte] -or
+        $Value -is [int16] -or $Value -is [uint16] -or
+        $Value -is [int32] -or $Value -is [uint32] -or
+        $Value -is [int64] -or $Value -is [uint64] -or
+        $Value -is [single] -or $Value -is [double] -or
+        $Value -is [decimal]
+    )
+    return $isNumber -and ([decimal]$Value -eq 1)
+}
+
+$requiredFiles = @(
+    "AGENTS.md",
+    ".agents/workflow.json",
+    ".agents/prompts/00_project_hub.md",
+    ".agents/prompts/08_result_handoff.md",
+    ".agents/skills/project-workflow-manager/SKILL.md",
+    ".agents/skills/project-workflow-manager/agents/openai.yaml",
+    ".agents/snippets/AGENTS.integration.md",
+    "docs/PROJECT_STATE.md",
+    "docs/DEVELOPMENT_SOP.md",
+    "docs/WORKFLOW_GUIDE.md"
+)
+if ($AllowPlaceholders) {
+    $requiredFiles += @("README.md", "VERSION")
+}
+foreach ($relative in $requiredFiles) {
+    $path = Resolve-InTarget $relative
+    if ($path -and -not (Test-Path -LiteralPath $path -PathType Leaf)) {
+        Add-Error "Missing $relative"
+    }
+}
+
+$promptsRoot = Join-Path $targetRoot ".agents/prompts"
+foreach ($prefix in @("00", "08")) {
+    $matches = if (Test-Path -LiteralPath $promptsRoot -PathType Container) {
+        @(Get-ChildItem -LiteralPath $promptsRoot -File -Filter "${prefix}_*.md")
+    } else {
+        @()
+    }
+    if ($matches.Count -ne 1) {
+        Add-Error "Expected exactly one ${prefix}_*.md prompt."
+    }
+}
+
+$legacyPaths = @(
+    ".agents/skills/manage-project-workflow",
+    "docs/MODULE_INDEX.md",
+    "docs/NEXT_TASK.md",
+    "docs/RISKS.md",
+    "docs/DECISIONS.md",
+    "docs/WEEKLY_LOG.md"
+)
+foreach ($relative in $legacyPaths) {
+    if (Test-Path -LiteralPath (Join-Path $targetRoot $relative)) {
+        Report-LegacyPath "Legacy path remains: $relative"
+    }
+}
+foreach ($prefix in 1..6) {
+    if (Test-Path -LiteralPath $promptsRoot -PathType Container) {
+        $pattern = "{0:D2}_*.md" -f $prefix
+        $legacyPromptCount = @(Get-ChildItem -LiteralPath $promptsRoot -File -Filter $pattern).Count
+        if ($legacyPromptCount -gt 0) {
+            Report-LegacyPath "Legacy prompt pattern remains: .agents/prompts/$pattern ($legacyPromptCount file(s))"
+        }
+    }
+}
+
 $configRelative = ".agents/workflow.json"
-$configPath = Resolve-InTarget $configRelative
+$configPath = Join-Path $targetRoot $configRelative
 $config = $null
-if (-not (Test-Path -LiteralPath $configPath -PathType Leaf)) {
-    Add-Error "Missing $configRelative"
-} else {
+$configParsed = $false
+$configIsObject = $false
+if (Test-Path -LiteralPath $configPath -PathType Leaf) {
     try {
-        $config = Get-Content -Raw -Encoding UTF8 -LiteralPath $configPath | ConvertFrom-Json
+        $parsedConfig = Get-Content -Raw -Encoding UTF8 -LiteralPath $configPath | ConvertFrom-Json
+        $configParsed = $true
+        if (
+            $null -ne $parsedConfig -and
+            $parsedConfig.GetType().FullName -eq "System.Management.Automation.PSCustomObject"
+        ) {
+            $config = $parsedConfig
+            $configIsObject = $true
+        } else {
+            Add-Error "The JSON root in $configRelative must be an object."
+        }
     } catch {
         Add-Error "Invalid JSON in ${configRelative}: $($_.Exception.Message)"
     }
 }
 
-$fixedRequired = @(
-    "AGENTS.md",
-    ".agents/skills/manage-project-workflow/SKILL.md",
-    ".agents/skills/manage-project-workflow/agents/openai.yaml",
-    ".agents/skills/manage-project-workflow/references/document-contracts.md"
-)
-foreach ($relative in $fixedRequired) {
-    $path = Resolve-InTarget $relative
-    if ($path -and -not (Test-Path -LiteralPath $path -PathType Leaf)) { Add-Error "Missing $relative" }
-}
+if ($configParsed -and $configIsObject) {
+    if (-not (Test-JsonNumberEqualOne $config.schema_version)) {
+        Add-Error "Unsupported schema_version: $($config.schema_version)"
+    }
 
-1..6 | ForEach-Object {
-    $pattern = ".agents/prompts/{0:D2}_*.md" -f $_
-    $matches = @(Get-ChildItem -Path (Join-Path $targetRoot $pattern) -File -ErrorAction SilentlyContinue)
-    if ($matches.Count -ne 1) { Add-Error "Expected one prompt matching $pattern" }
-}
-
-if ($config) {
-    if ($config.schema_version -ne 1) { Add-Error "Unsupported schema_version: $($config.schema_version)" }
-    foreach ($relative in @($config.required_context)) {
-        $path = Resolve-InTarget $relative
-        if ($path -and -not (Test-Path -LiteralPath $path -PathType Leaf)) {
-            Add-Error "required_context path is missing: $relative"
+    $requiredContextProperty = $config.PSObject.Properties["required_context"]
+    if (-not $requiredContextProperty -or $config.required_context -isnot [System.Array]) {
+        Add-Error "required_context must be a JSON array."
+    } elseif (@($config.required_context).Count -eq 0) {
+        Add-Error "required_context must not be empty."
+    } else {
+        foreach ($relativeValue in @($config.required_context)) {
+            if ($relativeValue -isnot [string]) {
+                Add-Error "Every required_context entry must be a string."
+                continue
+            }
+            $relative = [string]$relativeValue
+            $path = Resolve-InTarget $relative
+            if ($path -and -not (Test-Path -LiteralPath $path -PathType Leaf)) {
+                Add-Error "required_context path is missing: $relative"
+            }
         }
     }
-    foreach ($property in @($config.paths.documents.PSObject.Properties)) {
-        $relative = [string]$property.Value
-        $path = Resolve-InTarget $relative
-        if ($path -and -not (Test-Path -LiteralPath $path -PathType Leaf)) {
-            Add-Error "Configured document role '$($property.Name)' is missing: $relative"
+
+    $projectProperty = $config.PSObject.Properties["project"]
+    $projectNameProperty = if ($projectProperty -and $config.project -is [pscustomobject]) {
+        $config.project.PSObject.Properties["name"]
+    } else {
+        $null
+    }
+    if (-not $projectNameProperty -or $config.project.name -isnot [string] -or [string]::IsNullOrWhiteSpace($config.project.name)) {
+        Add-Error "project.name must be a non-empty string."
+    } elseif ($AllowPlaceholders -and $config.project.name -cne "<PROJECT_NAME>") {
+        Add-Error "Template project.name must be <PROJECT_NAME>."
+    } elseif (-not $AllowPlaceholders -and $config.project.name -ceq "<PROJECT_NAME>") {
+        Add-Error "Installed project.name still contains <PROJECT_NAME>."
+    }
+
+    $pathsProperty = $config.PSObject.Properties["paths"]
+    if (-not $pathsProperty -or $config.paths -isnot [pscustomobject]) {
+        Add-Error "paths must be a JSON object."
+    } else {
+        foreach ($role in @("rules", "sop", "project_state")) {
+            $roleProperty = $config.paths.PSObject.Properties[$role]
+            if (-not $roleProperty -or $roleProperty.Value -isnot [string]) {
+                Add-Error "paths.$role must be a relative path string."
+                continue
+            }
+            $relative = [string]$roleProperty.Value
+            $path = Resolve-InTarget $relative
+            if ($path -and -not (Test-Path -LiteralPath $path -PathType Leaf)) {
+                Add-Error "Configured path is missing: paths.$role=$relative"
+            }
         }
     }
-    foreach ($root in @($config.paths.source_roots)) {
-        if ($root -eq "<AUTO_DISCOVER>") {
-            Add-Warning "Source roots are set to automatic discovery; confirm MODULE_INDEX.md after installation."
+
+    $workProperty = $config.PSObject.Properties["work"]
+    if (
+        -not $workProperty -or $config.work -isnot [pscustomobject] -or
+        $config.work.mode -isnot [string] -or $config.work.mode -cne "read_only"
+    ) {
+        Add-Error "work.mode must be read_only."
+    }
+
+    $authorizationProperty = $config.PSObject.Properties["authorization"]
+    if (-not $authorizationProperty -or $config.authorization -isnot [pscustomobject]) {
+        Add-Error "authorization must be a JSON object."
+    } else {
+        foreach ($field in @("modify", "check", "build", "test", "documentation_sync", "commit", "push")) {
+            $fieldProperty = $config.authorization.PSObject.Properties[$field]
+            if (
+                -not $fieldProperty -or $fieldProperty.Value -isnot [string] -or
+                $fieldProperty.Value -cne "separate"
+            ) {
+                Add-Error "authorization.$field must be separate."
+            }
+        }
+    }
+
+    $taskPolicyProperty = $config.PSObject.Properties["task_policy"]
+    if (-not $taskPolicyProperty -or $config.task_policy -isnot [pscustomobject]) {
+        Add-Error "task_policy must be a JSON object."
+    } else {
+        if (-not (Test-JsonNumberEqualOne $config.task_policy.max_active_tasks)) {
+            Add-Error "task_policy.max_active_tasks must be the number 1."
+        }
+        if (
+            $config.task_policy.blocked_or_waiting_occupies_slot -isnot [bool] -or
+            -not $config.task_policy.blocked_or_waiting_occupies_slot
+        ) {
+            Add-Error "task_policy.blocked_or_waiting_occupies_slot must be true."
+        }
+        if ($config.task_policy.return_to_work_on_change -isnot [System.Array]) {
+            Add-Error "task_policy.return_to_work_on_change must be a JSON array."
         } else {
-            $path = Resolve-InTarget $root
-            if ($path -and -not (Test-Path -LiteralPath $path -PathType Container)) {
-                Add-Warning "Configured source root does not exist: $root"
+            if (
+                @(
+                    $config.task_policy.return_to_work_on_change |
+                        Where-Object { $_ -isnot [string] }
+                ).Count -gt 0
+            ) {
+                Add-Error "task_policy.return_to_work_on_change entries must all be strings."
+            }
+            foreach ($requiredValue in @("scope", "interface", "environment", "acceptance_criteria")) {
+                if ($config.task_policy.return_to_work_on_change -cnotcontains $requiredValue) {
+                    Add-Error "task_policy.return_to_work_on_change is missing: $requiredValue"
+                }
+            }
+        }
+    }
+
+    $executionPolicyProperty = $config.PSObject.Properties["execution_policy"]
+    if (-not $executionPolicyProperty -or $config.execution_policy -isnot [pscustomobject]) {
+        Add-Error "execution_policy must be a JSON object."
+    } else {
+        foreach ($field in @("high_risk_operations", "external_operations")) {
+            $fieldProperty = $config.execution_policy.PSObject.Properties[$field]
+            if (
+                -not $fieldProperty -or $fieldProperty.Value -isnot [string] -or
+                $fieldProperty.Value -cne "serial"
+            ) {
+                Add-Error "execution_policy.$field must be serial."
+            }
+        }
+    }
+
+    $handoffPolicyProperty = $config.PSObject.Properties["handoff_policy"]
+    if (-not $handoffPolicyProperty -or $config.handoff_policy -isnot [pscustomobject]) {
+        Add-Error "handoff_policy must be a JSON object."
+    } elseif ($config.handoff_policy.only_when -isnot [System.Array]) {
+        Add-Error "handoff_policy.only_when must be a JSON array."
+    } else {
+        if (
+            @(
+                $config.handoff_policy.only_when |
+                    Where-Object { $_ -isnot [string] }
+            ).Count -gt 0
+        ) {
+            Add-Error "handoff_policy.only_when entries must all be strings."
+        }
+        foreach ($requiredValue in @("coordination_required", "user_choice_required", "user_requested")) {
+            if ($config.handoff_policy.only_when -cnotcontains $requiredValue) {
+                Add-Error "handoff_policy.only_when is missing: $requiredValue"
             }
         }
     }
 }
 
-$skillPath = Join-Path $targetRoot ".agents/skills/manage-project-workflow/SKILL.md"
+$skillPath = Join-Path $targetRoot ".agents/skills/project-workflow-manager/SKILL.md"
 if (Test-Path -LiteralPath $skillPath -PathType Leaf) {
-    $head = @(Get-Content -Encoding UTF8 -LiteralPath $skillPath | Select-Object -First 4)
-    if (($head.Count -lt 4) -or ($head[0] -ne "---") -or ($head[1] -ne "name: manage-project-workflow") -or ($head[3] -ne "---")) {
-        Add-Error "Skill frontmatter is invalid or the name does not match its folder."
+    $skillText = [System.IO.File]::ReadAllText($skillPath)
+    $frontmatterMatch = [regex]::Match(
+        $skillText,
+        '\A---\r?\n(?<frontmatter>.*?)\r?\n---(?:\r?\n|\z)',
+        [System.Text.RegularExpressions.RegexOptions]::Singleline
+    )
+    if (-not $frontmatterMatch.Success) {
+        Add-Error "Skill frontmatter is missing or malformed."
+    } else {
+        $frontmatter = $frontmatterMatch.Groups["frontmatter"].Value
+        if ($frontmatter -notmatch '(?m)^name:\s*project-workflow-manager\s*$') {
+            Add-Error "Skill frontmatter name must be project-workflow-manager."
+        }
+        $descriptionMatch = [regex]::Match($frontmatter, '(?m)^description:\s*(?<value>.+?)\s*$')
+        if (-not $descriptionMatch.Success -or $descriptionMatch.Groups["value"].Value -in @('""', "''")) {
+            Add-Error "Skill frontmatter description must be non-empty."
+        }
+    }
+}
+
+$openAiPath = Join-Path $targetRoot ".agents/skills/project-workflow-manager/agents/openai.yaml"
+if (Test-Path -LiteralPath $openAiPath -PathType Leaf) {
+    $openAiText = [System.IO.File]::ReadAllText($openAiPath)
+    if ($openAiText -notmatch '(?m)^interface:\s*(?:#.*)?$') {
+        Add-Error "openai.yaml is missing the interface mapping."
+    }
+    foreach ($field in @("display_name", "short_description", "default_prompt")) {
+        $fieldMatch = [regex]::Match($openAiText, "(?m)^\s+$field`:\s*(?<value>.+?)\s*$")
+        if (-not $fieldMatch.Success -or $fieldMatch.Groups["value"].Value -in @('""', "''")) {
+            Add-Error "openai.yaml is missing a non-empty interface.$field."
+        }
+    }
+    if ($openAiText -notmatch [regex]::Escape('$project-workflow-manager')) {
+        Add-Error "openai.yaml default_prompt must reference `$project-workflow-manager."
     }
 }
 
 $textFiles = New-Object System.Collections.Generic.List[System.IO.FileInfo]
 $agentRules = Join-Path $targetRoot "AGENTS.md"
-if (Test-Path -LiteralPath $agentRules -PathType Leaf) { $textFiles.Add((Get-Item -LiteralPath $agentRules)) }
+if (Test-Path -LiteralPath $agentRules -PathType Leaf) {
+    $textFiles.Add((Get-Item -LiteralPath $agentRules))
+}
 foreach ($managedRoot in @(".agents", "docs")) {
     $managedPath = Join-Path $targetRoot $managedRoot
     if (Test-Path -LiteralPath $managedPath -PathType Container) {
-        Get-ChildItem -LiteralPath $managedPath -Recurse -File -Include *.md,*.json,*.yaml | ForEach-Object { $textFiles.Add($_) }
+        Get-ChildItem -LiteralPath $managedPath -Recurse -File |
+            Where-Object { $_.Extension -in @(".md", ".json", ".yaml", ".yml") } |
+            ForEach-Object { $textFiles.Add($_) }
     }
 }
-$projectTokenFiles = @($textFiles | Select-String -SimpleMatch "<PROJECT_NAME>" | Select-Object -ExpandProperty Path -Unique)
+$projectTokenFiles = @(
+    $textFiles |
+        Select-String -SimpleMatch "<PROJECT_NAME>" |
+        Select-Object -ExpandProperty Path -Unique
+)
 if ($projectTokenFiles.Count -gt 0) {
-    $message = "Unresolved <PROJECT_NAME> in: " + (($projectTokenFiles | ForEach-Object { $_.Substring($targetRoot.Length).TrimStart('\', '/') }) -join ", ")
-    if ($AllowPlaceholders) { Add-Warning $message } else { Add-Error $message }
+    $relativeTokenFiles = $projectTokenFiles | ForEach-Object {
+        $_.Substring($targetRoot.Length).TrimStart('\', '/')
+    }
+    $message = "Unresolved <PROJECT_NAME> in: " + ($relativeTokenFiles -join ", ")
+    if ($AllowPlaceholders) {
+        Add-Warning $message
+    } else {
+        Add-Error $message
+    }
+} elseif ($AllowPlaceholders) {
+    Add-Error "Template does not contain the required <PROJECT_NAME> placeholder."
 }
 
-foreach ($warning in $warnings) { Write-Host "WARN  $warning" -ForegroundColor Yellow }
-foreach ($errorItem in $errors) { Write-Host "ERROR $errorItem" -ForegroundColor Red }
+foreach ($warning in $warnings) {
+    Write-Host "WARN  $warning" -ForegroundColor Yellow
+}
+foreach ($errorItem in $errors) {
+    Write-Host "ERROR $errorItem" -ForegroundColor Red
+}
 
 if ($errors.Count -gt 0) {
     Write-Host "Validation failed: $($errors.Count) error(s), $($warnings.Count) warning(s)."

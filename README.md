@@ -1,63 +1,61 @@
 # Codex Project Flow
 
-一套可移植的 Codex 项目协作工作流。它把“先理解项目、只维护一个当前任务、基于证据更新状态、区分实现与验证、按需生成周报”整理成可复制的 `.agents`、`AGENTS.md` 和 `docs` 骨架。
+一套简洁、可移植的 Codex 项目协作模板。它把只读 Work、编号授权、单活动任务、证据分级和长期状态维护整理为可复制的规则、配置、提示词与文档骨架。
 
-它不绑定编程语言、构建系统、目录名称或硬件环境，适用于新项目，也可以非破坏地安装到已有仓库。
+模板不绑定语言、框架、目录结构、设备或运行环境，可用于新项目，也可非破坏地安装到已有仓库。
 
-## 包含内容
+## 模板内容
 
-- `.agents/skills/manage-project-workflow/`：项目状态维护技能。
-- `.agents/prompts/`：熟悉项目、设置任务、开发、开发后同步和周报提示词。
-- `.agents/workflow.json`：项目级路径和策略配置。
-- `AGENTS.md`：可直接定制的通用协作规则。
-- `docs/`：状态、模块索引、当前任务、风险、决策和周记录模板。
-- `scripts/`：零第三方依赖的安装和校验脚本。
+- `AGENTS.md`：通用协作边界、按需读取和证据规则。
+- `.agents/workflow.json`：规则、SOP、状态路径与授权策略。
+- `.agents/prompts/00_project_hub.md`：项目中枢入口。
+- `.agents/prompts/08_result_handoff.md`：必要时的结果回传格式。
+- `.agents/skills/project-workflow-manager/`：只维护长期项目状态的 Skill。
+- `.agents/snippets/AGENTS.integration.md`：已有根规则时的人工合并片段。
+- `docs/PROJECT_STATE.md`：唯一动态项目状态。
+- `docs/DEVELOPMENT_SOP.md`：从 Work、授权到证据收尾的执行规范。
+- `docs/WORKFLOW_GUIDE.md`：日常使用说明。
+- `scripts/`：安装与结构校验入口。
 
-## 使用方式
+## 安装
 
-### 方式一：把本仓库作为新项目模板
-
-复制或克隆本仓库，删除本 README 中不需要的说明，然后填写：
-
-1. `AGENTS.md` 的项目概况和环境约束。
-2. `.agents/workflow.json` 的项目名、源码根目录和必读文件。
-3. `docs/PROJECT_STATE.md` 与 `docs/MODULE_INDEX.md`。
-4. `docs/NEXT_TASK.md` 中由用户指定的唯一当前任务。
-
-### 方式二：安装到已有项目
-
-Windows PowerShell 5.1+：
+PowerShell：
 
 ```powershell
-.\scripts\install.ps1 -Target C:\path\to\project -ProjectName "My Project"
+.\scripts\install.ps1 -Target ..\your-project -ProjectName "Your Project"
 ```
 
-Linux/macOS：
+POSIX shell：
 
 ```sh
-./scripts/install.sh /path/to/project "My Project"
+./scripts/install.sh ../your-project "Your Project"
 ```
 
-安装器默认跳过已有文件，不覆盖你的内容。已有根 `AGENTS.md` 时，可从新安装的 `.agents/snippets/AGENTS.integration.md` 人工合并通用规则。确实需要替换时使用 PowerShell 的 `-Force` 或 shell 的 `--force`；原文件会先备份到目标项目的 `.project-flow-backup/<timestamp>/`。
+安装器默认跳过目标项目中的已有文件，不覆盖现有内容。目标项目已有根 `AGENTS.md` 时，安装后人工合并 `.agents/snippets/AGENTS.integration.md`。
 
-如果现有工程已经采用不同的状态文档路径，安装后调整 `.agents/workflow.json` 的 `paths.documents`，再运行校验；不要为了迎合模板移动原有工程文件。
+确实需要覆盖时，使用 PowerShell 的 `-Force` 或 shell 的 `--force`。被替换的文件会先备份到目标项目的 `.project-flow-backup/<timestamp>/`。
 
-## 日常入口
+## 定制点
 
-按需把 `.agents/prompts/` 中的提示词发送给 Codex：
+安装后至少完成以下定制：
 
-1. `01_start_project.md`：只读熟悉工程。
-2. `02_set_next_task.md`：把用户指定的任务写成唯一当前任务。
-3. `03_develop_task.md`：围绕当前任务开发和验证。
-4. `04_update_after_dev.md`：基于本轮证据同步状态文档。
-5. `05_weekly_log.md`：生成偏结果的周记录。
-6. `06_audit_workflow.md`：检查文档、状态和工程结构是否一致。
+1. 在 `AGENTS.md` 填写少量稳定的项目事实，并补充项目特有的安全边界。
+2. 如项目使用不同路径，调整 `.agents/workflow.json` 中的规则、SOP 和状态路径。
+3. 在 `docs/DEVELOPMENT_SOP.md` 补充实际构建、测试和外部操作约束。
+4. 初始化 `docs/PROJECT_STATE.md` 的四个章节。
+5. 如已有更具体的根规则，人工合并集成片段，保留原项目更严格的约束。
 
-也可以直接调用 `$manage-project-workflow`。
+## 项目中枢
 
-## 校验
+将 `.agents/prompts/00_project_hub.md` 作为日常入口。中枢先进入只读 Work，确认目标、范围、不做项、环境和验收标准，再把修改、检查、构建、测试、文档同步、提交与推送拆成独立编号项。
 
-校验尚未渲染的模板仓库：
+只有用户选中的编号项可以执行。默认最多保留一个用户可见活动任务；阻塞和等待仍占槽。若当前产品具备任务管理能力，中枢使用它维护该任务；若不具备，则在当前会话继续并如实说明。
+
+只有需要协调、要求用户选择或用户明确要求时，才使用 `.agents/prompts/08_result_handoff.md` 回传结果。
+
+## 验证命令
+
+校验模板仓库：
 
 ```powershell
 .\scripts\validate.ps1 -Target . -AllowPlaceholders
@@ -67,29 +65,23 @@ Linux/macOS：
 ALLOW_PLACEHOLDERS=1 ./scripts/validate.sh .
 ```
 
-安装到目标工程后，不应再残留项目名占位符：
+安装到目标项目后：
 
 ```powershell
-.\scripts\validate.ps1 -Target C:\path\to\project
+.\scripts\validate.ps1 -Target .
 ```
 
 ```sh
-./scripts/validate.sh /path/to/project
+./scripts/validate.sh .
 ```
 
-校验覆盖必需文件、JSON 配置、文档角色、必读路径、技能 frontmatter 和占位符。发布前还应单独扫描项目专有名称、绝对路径和凭据。
-
-PowerShell 自测试：
-
-```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\test.ps1
-```
+校验只确认模板结构和配置一致性，不替代项目自身的检查、构建或测试。发布前还应单独扫描项目专有名称、绝对路径、账号和凭据。
 
 ## 设计原则
 
-- 用户决定任务方向；工作流只负责整理和执行。
-- 一次只维护一个最小工作单元。
-- “已有实现”“已执行测试”“已通过验收”分别记录。
-- 不把历史结果或计划当成本轮验证证据。
-- 不假设 `src/`、`test/`、单体仓库或特定语言；模块结构由实际仓库发现。
-- 安装默认非破坏，强制覆盖前自动备份。
+- 用户决定任务方向和执行授权。
+- Work 只读；各类执行动作分别授权。
+- 一次只维护一个用户可见活动任务。
+- 范围、接口、环境或验收变化时回到 Work。
+- “文档确认”“静态检查”“实际构建或测试”“外部回传”分别记录。
+- 安装默认非破坏；强制覆盖前自动备份。

@@ -1,93 +1,48 @@
 {
   "schema_version": 1,
   "project": {
-    "name": "<PROJECT_NAME>",
-    "description": "<PROJECT_DESCRIPTION>",
-    "primary_goal": "<PRIMARY_GOAL>",
-    "language": "zh-CN",
-    "audience": "project collaborators"
+    "name": "<PROJECT_NAME>"
   },
   "paths": {
     "rules": "AGENTS.md",
-    "documents": {
-      "project_state": "docs/PROJECT_STATE.md",
-      "module_index": "docs/MODULE_INDEX.md",
-      "current_task": "docs/NEXT_TASK.md",
-      "risks": "docs/RISKS.md",
-      "decisions": "docs/DECISIONS.md",
-      "periodic_log": "docs/WEEKLY_LOG.md"
-    },
-    "source_roots": [
-      "<AUTO_DISCOVER>"
-    ],
-    "protected_paths": []
+    "sop": "docs/DEVELOPMENT_SOP.md",
+    "project_state": "docs/PROJECT_STATE.md"
   },
   "required_context": [
     "AGENTS.md",
-    ".agents/workflow.json",
-    "docs/PROJECT_STATE.md",
-    "docs/MODULE_INDEX.md",
-    "docs/NEXT_TASK.md",
-    "docs/RISKS.md",
-    "docs/DECISIONS.md",
-    "docs/WEEKLY_LOG.md"
+    "docs/DEVELOPMENT_SOP.md"
   ],
-  "missing_document_policy": "warn",
-  "task_policy": {
-    "source": "user_or_explicitly_delegated",
-    "max_active_tasks": 1
+  "work": {
+    "mode": "read_only"
   },
-  "sync_policy": {
-    "after_source_change": [
-      "current_task",
-      "risks",
-      "decisions"
-    ],
-    "when_stage_changes": [
-      "project_state"
-    ],
-    "when_module_boundaries_change": [
-      "module_index"
+  "authorization": {
+    "modify": "separate",
+    "check": "separate",
+    "build": "separate",
+    "test": "separate",
+    "documentation_sync": "separate",
+    "commit": "separate",
+    "push": "separate"
+  },
+  "task_policy": {
+    "max_active_tasks": 1,
+    "blocked_or_waiting_occupies_slot": true,
+    "return_to_work_on_change": [
+      "scope",
+      "interface",
+      "environment",
+      "acceptance_criteria"
     ]
   },
-  "schedule": {
-    "enabled": true,
-    "period": "weekly",
-    "update_day": "Friday",
-    "timezone": "local",
-    "date_format": "YYYY.MM.DD"
+  "execution_policy": {
+    "high_risk_operations": "serial",
+    "external_operations": "serial"
   },
-  "evidence_states": [
-    "not_started",
-    "in_progress",
-    "implemented_not_verified",
-    "verified",
-    "blocked",
-    "needs_confirmation"
-  ],
-  "vcs": {
-    "type": "auto",
-    "inspect_unstaged": true,
-    "inspect_staged": true,
-    "inspect_untracked": true,
-    "baseline": "current_turn_start"
-  },
-  "environments": {
-    "editable": [
-      "local_workspace"
-    ],
-    "buildable": [
-      "auto_discover"
-    ],
-    "testable": [
-      "auto_discover"
-    ],
-    "remote_operations": "require_explicit_authorization"
-  },
-  "verification": {
-    "require_location": true,
-    "require_command": true,
-    "require_result": true,
-    "require_uncovered_items": true
+  "handoff_policy": {
+    "only_when": [
+      "coordination_required",
+      "user_choice_required",
+      "user_requested"
+    ]
   }
 }
