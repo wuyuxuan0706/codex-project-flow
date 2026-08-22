@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "workflow_version": "0.3.0",
+  "files": [
+    { "path": "AGENTS.md", "source": "AGENTS.md", "policy": "merge_manual", "render": "project_name" },
+    { "path": ".agents/workflow.json", "source": ".agents/workflow.json", "policy": "structured_manual", "render": "project_name_json" },
+    { "path": ".agents/prompts/00_project_hub.md", "source": ".agents/prompts/00_project_hub.md", "policy": "replace_if_unmodified", "render": "project_name" },
+    { "path": ".agents/prompts/08_result_handoff.md", "source": ".agents/prompts/08_result_handoff.md", "policy": "replace_if_unmodified", "render": "project_name" },
+    { "path": ".agents/prompts/09_execution_handoff.md", "source": ".agents/prompts/09_execution_handoff.md", "policy": "replace_if_unmodified", "render": "project_name" },
+    { "path": ".agents/skills/project-workflow-manager/SKILL.md", "source": ".agents/skills/project-workflow-manager/SKILL.md", "policy": "replace_if_unmodified", "render": "project_name" },
+    { "path": ".agents/skills/project-workflow-manager/agents/openai.yaml", "source": ".agents/skills/project-workflow-manager/agents/openai.yaml", "policy": "replace_if_unmodified", "render": "project_name" },
+    { "path": ".agents/snippets/AGENTS.integration.md", "source": ".agents/snippets/AGENTS.integration.md", "policy": "replace_if_unmodified", "render": "project_name" },
+    { "path": "docs/DEVELOPMENT_SOP.md", "source": "docs/DEVELOPMENT_SOP.md", "policy": "merge_manual", "render": "project_name" },
+    { "path": "docs/PROJECT_STATE.md", "source": "templates/PROJECT_STATE.md", "policy": "seed_once", "render": "project_name" },
+    { "path": "docs/WORKFLOW_GUIDE.md", "source": "docs/WORKFLOW_GUIDE.md", "policy": "replace_if_unmodified", "render": "project_name" }
+  ]
+}

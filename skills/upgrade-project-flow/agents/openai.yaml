@@ -1,0 +1,4 @@
+interface:
+  display_name: "Upgrade Project Flow"
+  short_description: "Safely plan, apply, or roll back workflow upgrades"
+  default_prompt: "Use $upgrade-project-flow to plan a safe update for this deployed project workflow."

@@ -60,6 +60,7 @@ $requiredFiles = @(
     ".agents/workflow.json",
     ".agents/prompts/00_project_hub.md",
     ".agents/prompts/08_result_handoff.md",
+    ".agents/prompts/09_execution_handoff.md",
     ".agents/skills/project-workflow-manager/SKILL.md",
     ".agents/skills/project-workflow-manager/agents/openai.yaml",
     ".agents/snippets/AGENTS.integration.md",
@@ -73,8 +74,16 @@ if ($AllowPlaceholders) {
         "VERSION",
         "templates/PROJECT_STATE.md",
         ".codex-plugin/plugin.json",
+        "managed-files.json",
+        "migrations/0.2.0-to-0.3.0.json",
+        "baselines/0.2.0/AGENTS.md",
+        "scripts/upgrade.sh",
+        "scripts/upgrade.ps1",
         "skills/bootstrap-project-flow/SKILL.md",
-        "skills/bootstrap-project-flow/agents/openai.yaml"
+        "skills/bootstrap-project-flow/agents/openai.yaml",
+        "skills/upgrade-project-flow/SKILL.md",
+        "skills/upgrade-project-flow/agents/openai.yaml",
+        "skills/upgrade-project-flow/references/upgrade-contract.md"
     )
 }
 foreach ($relative in $requiredFiles) {
@@ -85,7 +94,7 @@ foreach ($relative in $requiredFiles) {
 }
 
 $promptsRoot = Join-Path $targetRoot ".agents/prompts"
-foreach ($prefix in @("00", "08")) {
+foreach ($prefix in @("00", "08", "09")) {
     $matches = if (Test-Path -LiteralPath $promptsRoot -PathType Container) {
         @(Get-ChildItem -LiteralPath $promptsRoot -File -Filter "${prefix}_*.md")
     } else {
@@ -93,6 +102,54 @@ foreach ($prefix in @("00", "08")) {
     }
     if ($matches.Count -ne 1) {
         Add-Error "Expected exactly one ${prefix}_*.md prompt."
+    }
+}
+$rotationKeyFormat = '[codex-project-flow:execution:v1] projectId=<exactProjectId>; hubThreadId=<exactHubThreadId>; predecessorThreadId=<exactPredecessorThreadId>; generation=<positiveInteger>'
+foreach ($rotationIdentityRelative in @(
+    ".agents/workflow.json",
+    ".agents/prompts/00_project_hub.md",
+    ".agents/prompts/09_execution_handoff.md"
+)) {
+    $rotationIdentityPath = Join-Path $targetRoot $rotationIdentityRelative
+    if ((Test-Path -LiteralPath $rotationIdentityPath -PathType Leaf) -and
+        -not [System.IO.File]::ReadAllText($rotationIdentityPath).Contains($rotationKeyFormat)) {
+        Add-Error "Missing the complete v1 execution rotation key format in $rotationIdentityRelative"
+    }
+}
+$hubPromptPath = Join-Path $targetRoot ".agents/prompts/00_project_hub.md"
+if (Test-Path -LiteralPath $hubPromptPath -PathType Leaf) {
+    $hubPromptText = [System.IO.File]::ReadAllText($hubPromptPath)
+    foreach ($requiredRecoveryText in @(
+        "list_threads",
+        "read_thread",
+        "pinnedThreads",
+        "codexDelegation.input",
+        "无法证明穷尽",
+        "零个匹配继续等待",
+        "多个匹配停止并报告歧义"
+    )) {
+        if (-not $hubPromptText.Contains($requiredRecoveryText)) {
+            Add-Error "Project hub prompt is missing queued-recovery semantics: $requiredRecoveryText"
+        }
+    }
+}
+$handoffPromptPath = Join-Path $targetRoot ".agents/prompts/09_execution_handoff.md"
+if (Test-Path -LiteralPath $handoffPromptPath -PathType Leaf) {
+    $handoffPromptText = [System.IO.File]::ReadAllText($handoffPromptPath)
+    foreach ($requiredHandoffText in @(
+        "当前代次与继任代次",
+        "前任任务 ID",
+        "目标、范围、不做项、环境、验收标准",
+        "已授权动作",
+        "已完成修改及实际工作区状态",
+        "历史验证",
+        "剩余步骤、已知风险与下一安全点",
+        "不可轮换",
+        "中枢确认内容完整并 ACK"
+    )) {
+        if (-not $handoffPromptText.Contains($requiredHandoffText)) {
+            Add-Error "Execution handoff prompt is missing required protocol text: $requiredHandoffText"
+        }
     }
 }
 
@@ -115,6 +172,73 @@ foreach ($prefix in 1..6) {
         $legacyPromptCount = @(Get-ChildItem -LiteralPath $promptsRoot -File -Filter $pattern).Count
         if ($legacyPromptCount -gt 0) {
             Report-LegacyPath "Legacy prompt pattern remains: .agents/prompts/$pattern ($legacyPromptCount file(s))"
+        }
+    }
+}
+
+$installManifestPath = Join-Path $targetRoot ".project-flow/manifest.json"
+if (Test-Path -LiteralPath $installManifestPath) {
+    if (-not (Test-Path -LiteralPath $installManifestPath -PathType Leaf)) {
+        Add-Error ".project-flow/manifest.json exists and is not a regular file."
+    } else {
+        try {
+            $installManifest = Get-Content -Raw -Encoding UTF8 -LiteralPath $installManifestPath | ConvertFrom-Json
+            $expectedManifestFiles = [ordered]@{
+                "AGENTS.md" = @("AGENTS.md", "merge_manual")
+                ".agents/workflow.json" = @(".agents/workflow.json", "structured_manual")
+                ".agents/prompts/00_project_hub.md" = @(".agents/prompts/00_project_hub.md", "replace_if_unmodified")
+                ".agents/prompts/08_result_handoff.md" = @(".agents/prompts/08_result_handoff.md", "replace_if_unmodified")
+                ".agents/prompts/09_execution_handoff.md" = @(".agents/prompts/09_execution_handoff.md", "replace_if_unmodified")
+                ".agents/skills/project-workflow-manager/SKILL.md" = @(".agents/skills/project-workflow-manager/SKILL.md", "replace_if_unmodified")
+                ".agents/skills/project-workflow-manager/agents/openai.yaml" = @(".agents/skills/project-workflow-manager/agents/openai.yaml", "replace_if_unmodified")
+                ".agents/snippets/AGENTS.integration.md" = @(".agents/snippets/AGENTS.integration.md", "replace_if_unmodified")
+                "docs/DEVELOPMENT_SOP.md" = @("docs/DEVELOPMENT_SOP.md", "merge_manual")
+                "docs/PROJECT_STATE.md" = @("templates/PROJECT_STATE.md", "seed_once")
+                "docs/WORKFLOW_GUIDE.md" = @("docs/WORKFLOW_GUIDE.md", "replace_if_unmodified")
+            }
+            if ($installManifest.schema_version -ne 1 -or [string]$installManifest.workflow_version -cne "0.3.0") {
+                throw "unsupported schema or workflow version"
+            }
+            $manifestProjectName = [string]$installManifest.project_name
+            if ([string]::IsNullOrWhiteSpace($manifestProjectName)) { throw "project_name is empty" }
+            foreach ($character in $manifestProjectName.ToCharArray()) {
+                if ([char]::IsControl($character)) { throw "project_name contains a control character" }
+            }
+            if ([string]::IsNullOrWhiteSpace([string]$installManifest.installed_at_utc)) { throw "installed_at_utc is empty" }
+            if ($null -ne $installManifest.last_transaction -and [string]$installManifest.last_transaction -cnotmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$') {
+                throw "last_transaction is invalid"
+            }
+            $manifestEntries = @($installManifest.files)
+            if ($manifestEntries.Count -ne $expectedManifestFiles.Count) { throw "managed path count differs" }
+            $observedManifestFiles = @{}
+            foreach ($entry in $manifestEntries) {
+                $relative = [string]$entry.path
+                $relativeParts = $relative.Split([char[]]@('/', '\'))
+                $unsafeRelative = (
+                    [string]::IsNullOrWhiteSpace($relative) -or
+                    [System.IO.Path]::IsPathRooted($relative) -or
+                    $relative.Contains('\') -or
+                    $relative -match '^[A-Za-z]:' -or
+                    @($relativeParts | Where-Object { $_ -in @('', '.', '..') }).Count -gt 0
+                )
+                if ($unsafeRelative -or $observedManifestFiles.ContainsKey($relative)) {
+                    throw "unsafe or duplicate managed path: $relative"
+                }
+                if ([string]$entry.baseline_hash -cnotmatch '^sha256:[0-9a-f]{64}$') {
+                    throw "invalid baseline_hash for $relative"
+                }
+                $observedManifestFiles[$relative] = @([string]$entry.source, [string]$entry.policy)
+            }
+            foreach ($relative in $expectedManifestFiles.Keys) {
+                if (-not $observedManifestFiles.ContainsKey($relative)) { throw "missing managed path: $relative" }
+                $expectedPair = $expectedManifestFiles[$relative]
+                $actualPair = $observedManifestFiles[$relative]
+                if ($actualPair[0] -cne $expectedPair[0] -or $actualPair[1] -cne $expectedPair[1]) {
+                    throw "source or policy differs for $relative"
+                }
+            }
+        } catch {
+            Add-Error ".project-flow/manifest.json does not satisfy the 0.3.0 install contract: $($_.Exception.Message)"
         }
     }
 }
@@ -143,7 +267,7 @@ if (Test-Path -LiteralPath $configPath -PathType Leaf) {
 }
 
 if ($configParsed -and $configIsObject) {
-    if (-not (Test-JsonNumberEqualOne $config.schema_version)) {
+    if ($config.schema_version -isnot [ValueType] -or [double]$config.schema_version -ne 2) {
         Add-Error "Unsupported schema_version: $($config.schema_version)"
     }
 
@@ -178,13 +302,15 @@ if ($configParsed -and $configIsObject) {
         Add-Error "Template project.name must be <PROJECT_NAME>."
     } elseif (-not $AllowPlaceholders -and $config.project.name -ceq "<PROJECT_NAME>") {
         Add-Error "Installed project.name still contains <PROJECT_NAME>."
+    } elseif ($null -ne $installManifest -and [string]$installManifest.project_name -cne [string]$config.project.name) {
+        Add-Error ".project-flow/manifest.json project_name must match project.name."
     }
 
     $pathsProperty = $config.PSObject.Properties["paths"]
     if (-not $pathsProperty -or $config.paths -isnot [pscustomobject]) {
         Add-Error "paths must be a JSON object."
     } else {
-        foreach ($role in @("rules", "sop", "project_state")) {
+        foreach ($role in @("rules", "sop", "project_state", "execution_handoff")) {
             $roleProperty = $config.paths.PSObject.Properties[$role]
             if (-not $roleProperty -or $roleProperty.Value -isnot [string]) {
                 Add-Error "paths.$role must be a relative path string."
@@ -210,7 +336,7 @@ if ($configParsed -and $configIsObject) {
     if (-not $authorizationProperty -or $config.authorization -isnot [pscustomobject]) {
         Add-Error "authorization must be a JSON object."
     } else {
-        foreach ($field in @("modify", "check", "build", "test", "documentation_sync", "commit", "push")) {
+        foreach ($field in @("modify", "check", "build", "test", "documentation_sync", "commit", "push", "task_rotation")) {
             $fieldProperty = $config.authorization.PSObject.Properties[$field]
             if (
                 -not $fieldProperty -or $fieldProperty.Value -isnot [string] -or
@@ -264,9 +390,63 @@ if ($configParsed -and $configIsObject) {
             ) {
                 Add-Error "task_policy.return_to_work_on_change entries must all be strings."
             }
-            foreach ($requiredValue in @("scope", "interface", "environment", "acceptance_criteria")) {
+            foreach ($requiredValue in @("requirements", "scope", "interface", "protocol", "environment", "acceptance_criteria")) {
                 if ($config.task_policy.return_to_work_on_change -cnotcontains $requiredValue) {
                     Add-Error "task_policy.return_to_work_on_change is missing: $requiredValue"
+                }
+            }
+        }
+
+        $rotation = $config.task_policy.rotation
+        if ($rotation -isnot [pscustomobject]) {
+            Add-Error "task_policy.rotation must be a JSON object."
+        } else {
+            $expectedRotationStrings = @{
+                primary_trigger = "milestone_boundary_or_complete_modify_verify_cycle"
+                authorization_scope = "same_already_authorized_scope_only"
+                change_behavior = "return_to_work"
+                create_failure_without_id = "restore_predecessor"
+                queued_client_thread_id = "occupies_active_task_slot_and_do_not_retry"
+                successor_identity = "exact_rotation_key_v1_in_first_user_message"
+                queued_recovery = "exhaustive_same_project_discovery_and_exact_rotation_key_match"
+                rotation_key_format = "[codex-project-flow:execution:v1] projectId=<exactProjectId>; hubThreadId=<exactHubThreadId>; predecessorThreadId=<exactPredecessorThreadId>; generation=<positiveInteger>"
+                independent_worktree_requirement = "authorized_transferable_code_checkpoint"
+            }
+            foreach ($entry in $expectedRotationStrings.GetEnumerator()) {
+                $property = $rotation.PSObject.Properties[$entry.Key]
+                if (-not $property -or $property.Value -isnot [string] -or $property.Value -cne $entry.Value) {
+                    Add-Error "task_policy.rotation.$($entry.Key) must be $($entry.Value)."
+                }
+            }
+            if ($rotation.review_after_substantive_turns -isnot [ValueType] -or [double]$rotation.review_after_substantive_turns -ne 6) {
+                Add-Error "task_policy.rotation.review_after_substantive_turns must be 6."
+            }
+            if ($rotation.rotate_no_later_than_substantive_turns -isnot [ValueType] -or [double]$rotation.rotate_no_later_than_substantive_turns -ne 10) {
+                Add-Error "task_policy.rotation.rotate_no_later_than_substantive_turns must be 10."
+            }
+            foreach ($arraySpec in @(
+                [pscustomobject]@{ Name = "additional_triggers"; Values = @("context_pressure", "user_request") },
+                [pscustomobject]@{ Name = "state_machine"; Values = @("prepare_handoff_package", "project_hub_acknowledges_complete_handoff", "archive_predecessor", "create_successor", "successor_rechecks_rules_and_workspace") }
+            )) {
+                $property = $rotation.PSObject.Properties[$arraySpec.Name]
+                if (-not $property -or $property.Value -isnot [System.Array]) {
+                    Add-Error "task_policy.rotation.$($arraySpec.Name) must be a JSON array."
+                    continue
+                }
+                if (@($property.Value | Where-Object { $_ -isnot [string] }).Count -gt 0) {
+                    Add-Error "task_policy.rotation.$($arraySpec.Name) entries must all be strings."
+                }
+                foreach ($requiredValue in $arraySpec.Values) {
+                    if ($property.Value -cnotcontains $requiredValue) {
+                        Add-Error "task_policy.rotation.$($arraySpec.Name) is missing: $requiredValue"
+                    }
+                }
+                if ($arraySpec.Name -eq "state_machine") {
+                    $actualSequence = @($property.Value | ForEach-Object { [string]$_ })
+                    if ($actualSequence.Count -ne $arraySpec.Values.Count -or
+                        ($actualSequence -join "`n") -cne ($arraySpec.Values -join "`n")) {
+                        Add-Error "task_policy.rotation.state_machine must contain the exact ordered five-state sequence without duplicates."
+                    }
                 }
             }
         }
@@ -377,8 +557,8 @@ if ($AllowPlaceholders) {
                 if ($bootstrapDescription -notmatch '(?i)\b(?:install|import)\w*\b') {
                     Add-Error "Bootstrap Skill description must cover installing or importing the workflow."
                 }
-                if ($bootstrapDescription -notmatch '(?i)\b(?:create|reuse)\w*\b') {
-                    Add-Error "Bootstrap Skill description must cover creating or reusing the project hub task."
+                if ($bootstrapDescription -notmatch '(?i)\b(?:claim|adopt|make)\w*\b') {
+                    Add-Error "Bootstrap Skill description must cover making the current task the project hub."
                 }
                 if ($bootstrapDescription -notmatch '(?i)\buser-visible\b.*\bproject hub\b') {
                     Add-Error "Bootstrap Skill description must identify a user-visible project hub task."
@@ -423,6 +603,39 @@ if ($AllowPlaceholders) {
             }
             if (
                 $bootstrapSkillText -notmatch
+                    '(?is)\[codex-project-flow:hub-claim:v1\].{0,180}\bprojectId\s*=.{1,160};\s*hubTitle\s*='
+            ) {
+                Add-Error "Bootstrap Skill must define the interrupted current-task claim identity."
+            }
+            if (
+                $bootstrapSkillText -notmatch
+                    '(?is)\[codex-project-flow:hub-retired:v1\].{0,180}\bprojectId\s*=.{1,160};\s*retainedThreadId\s*='
+            ) {
+                Add-Error "Bootstrap Skill must define a durable retired-hub tombstone."
+            }
+            if (-not $bootstrapSkillText.Contains('Archiving alone is not cleanup')) {
+                Add-Error "Bootstrap Skill must explain why archiving alone cannot retire a v1 recovery candidate."
+            }
+            if (-not $bootstrapSkillText.Contains('exclude a same-project entry only when its complete title exactly matches')) {
+                Add-Error "Bootstrap Skill must exclude only an exact retired-hub tombstone."
+            }
+            if ($bootstrapSkillText -notmatch '\bseparateHubMode\b') {
+                Add-Error "Bootstrap Skill must preserve the explicit separate-hub compatibility mode."
+            }
+            if ($bootstrapSkillText -notmatch '(?is)(?:omit|omitted).{0,40}threadId|threadId.{0,40}(?:omit|omitted)') {
+                Add-Error "Bootstrap Skill must describe the implicit current-task title operation."
+            }
+            if ($bootstrapSkillText -notmatch '(?is)never call `?create_thread`?.{0,160}(?:failed|ambiguous)|failed.{0,160}never call `?create_thread`?') {
+                Add-Error "Bootstrap Skill must forbid silent create_thread fallback after claim failure."
+            }
+            if ($bootstrapSkillText -notmatch '(?i)exhaust(?:ive|ively|ion)|prove exhaustion') {
+                Add-Error "Bootstrap Skill must require exhaustive task discovery."
+            }
+            if ($bootstrapSkillText -notmatch '(?is)(?:reaches|reached).{0,60}(?:requested )?limit.{0,100}stop|stop.{0,100}(?:reaches|reached).{0,60}(?:requested )?limit') {
+                Add-Error "Bootstrap Skill must stop when task-list exhaustion cannot be proven."
+            }
+            if (
+                $bootstrapSkillText -notmatch
                     '(?im)^[^\r\n]*(?:queued|clientThreadId)[^\r\n]*(?:do not|never|not to)[^\r\n]*(?:call\s+)?[^\w\s]?create_thread[^\w\s]?\s+again[^\r\n]*$'
             ) {
                 Add-Error "Bootstrap Skill queued handling must forbid another create_thread call."
@@ -461,6 +674,57 @@ if ($AllowPlaceholders) {
                 [regex]::Escape('$bootstrap-project-flow')
         ) {
             Add-Error "Bootstrap openai.yaml default_prompt must reference `$bootstrap-project-flow."
+        }
+        if (
+            -not $defaultPromptMatch.Success -or
+            $defaultPromptMatch.Groups["value"].Value -notmatch
+                '(?i)(?:claim|adopt).{0,80}(?:this|current).{0,40}(?:task|hub)|(?:this|current).{0,40}task.{0,80}(?:claim|adopt)'
+        ) {
+            Add-Error "Bootstrap openai.yaml default_prompt must make current-task hub adoption the default."
+        }
+    }
+
+    $upgradeSkillPath = Join-Path $targetRoot "skills/upgrade-project-flow/SKILL.md"
+    if (Test-Path -LiteralPath $upgradeSkillPath -PathType Leaf) {
+        $upgradeSkillText = [System.IO.File]::ReadAllText($upgradeSkillPath)
+        $upgradeFrontmatterMatch = [regex]::Match(
+            $upgradeSkillText,
+            '\A---\r?\n(?<frontmatter>.*?)\r?\n---(?:\r?\n|\z)',
+            [System.Text.RegularExpressions.RegexOptions]::Singleline
+        )
+        if (-not $upgradeFrontmatterMatch.Success) {
+            Add-Error "Upgrade Skill frontmatter is missing or malformed."
+        } else {
+            $upgradeFrontmatter = $upgradeFrontmatterMatch.Groups["frontmatter"].Value
+            if ($upgradeFrontmatter -notmatch '(?m)^name:\s*upgrade-project-flow\s*$') {
+                Add-Error "Upgrade Skill frontmatter name must be upgrade-project-flow."
+            }
+            if ($upgradeFrontmatter -notmatch '(?im)^description:\s*.*\b(?:upgrade|sync)\w*\b') {
+                Add-Error "Upgrade Skill description must cover upgrading or syncing deployed projects."
+            }
+        }
+        if ($upgradeSkillText -notmatch [regex]::Escape('references/upgrade-contract.md')) {
+            Add-Error "Upgrade Skill must reference the upgrade contract."
+        }
+        if ($upgradeSkillText -notmatch [regex]::Escape('--adopt-from 0.2.0')) {
+            Add-Error "Upgrade Skill must require explicit 0.2.0 legacy adoption."
+        }
+        if ($upgradeSkillText -notmatch [regex]::Escape('--accept-local')) {
+            Add-Error "Upgrade Skill must expose explicit per-path local conflict acceptance."
+        }
+        if ($upgradeSkillText -notmatch '(?is)default.{0,40}(?:read-only|plan)') {
+            Add-Error "Upgrade Skill must make read-only planning the default."
+        }
+    }
+
+    $upgradeOpenAiPath = Join-Path $targetRoot "skills/upgrade-project-flow/agents/openai.yaml"
+    if (Test-Path -LiteralPath $upgradeOpenAiPath -PathType Leaf) {
+        $upgradeOpenAiText = [System.IO.File]::ReadAllText($upgradeOpenAiPath)
+        if ($upgradeOpenAiText -notmatch '(?m)^interface:\s*(?:#.*)?$') {
+            Add-Error "Upgrade openai.yaml is missing the interface mapping."
+        }
+        if ($upgradeOpenAiText -notmatch [regex]::Escape('$upgrade-project-flow')) {
+            Add-Error "Upgrade openai.yaml default_prompt must reference `$upgrade-project-flow."
         }
     }
 }

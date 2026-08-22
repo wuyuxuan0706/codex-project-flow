@@ -16,17 +16,124 @@ trap cleanup EXIT HUP INT TERM
 empty_target="$test_root/empty-project"
 existing_target="$test_root/existing-project"
 legacy_target="$test_root/legacy-project"
+upgrade_target="$test_root/upgrade-project"
+conflict_target="$test_root/conflict-project"
+noop_invalid_target="$test_root/noop-invalid-project"
 control_target="$test_root/control-project"
 link_target="$test_root/link-project"
 outside_target="$test_root/outside-project"
+midwrite_target="$test_root/midwrite-project"
+plugin_link_target="$test_root/plugin-link-project"
+fake_handoff_target="$test_root/fake-handoff-project"
 special_project_name='Quote "value" Backslash \ Ampersand & Pipe |'
 mkdir -p \
     "$empty_target" \
     "$existing_target" \
     "$legacy_target" \
+    "$upgrade_target" \
+    "$conflict_target" \
+    "$noop_invalid_target" \
     "$control_target" \
     "$link_target" \
+    "$midwrite_target" \
+    "$plugin_link_target" \
+    "$fake_handoff_target" \
     "$outside_target"
+
+assert_manifest_contract() {
+    manifest_target=$1
+    manifest_project_name=$2
+    python3 - "$repo_root" "$manifest_target/.project-flow/manifest.json" "$manifest_project_name" <<'PY'
+import hashlib
+import json
+from pathlib import Path
+import re
+import sys
+
+repo = Path(sys.argv[1])
+manifest_path = Path(sys.argv[2])
+project_name = sys.argv[3]
+
+def load_json(path):
+    with path.open("r", encoding="utf-8-sig") as handle:
+        return json.load(handle)
+
+def normalized_text(path):
+    data = path.read_bytes()
+    if data.startswith(b"\xef\xbb\xbf"):
+        data = data[3:]
+    return data.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
+
+managed = load_json(repo / "managed-files.json")
+manifest = load_json(manifest_path)
+assert managed["workflow_version"] == "0.3.0"
+assert manifest["schema_version"] == 1
+assert manifest["workflow_version"] == managed["workflow_version"]
+assert manifest["project_name"] == project_name
+assert isinstance(manifest.get("installed_at_utc"), str) and manifest["installed_at_utc"]
+assert "last_transaction" in manifest
+last_transaction = manifest.get("last_transaction")
+assert last_transaction is None or (
+    isinstance(last_transaction, str) and
+    re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", last_transaction)
+)
+
+expected = [(item["path"], item["source"], item["policy"]) for item in managed["files"]]
+actual = [(item["path"], item["source"], item["policy"]) for item in manifest["files"]]
+assert actual == expected, (actual, expected)
+assert len({item["path"] for item in manifest["files"]}) == len(expected)
+assert ".agents/prompts/09_execution_handoff.md" in {item["path"] for item in manifest["files"]}
+
+for managed_item, manifest_item in zip(managed["files"], manifest["files"]):
+    text = normalized_text(repo / managed_item["source"])
+    if managed_item["render"] == "project_name_json":
+        text = text.replace('"<PROJECT_NAME>"', json.dumps(project_name, ensure_ascii=False))
+    else:
+        text = text.replace("<PROJECT_NAME>", project_name)
+    expected_hash = "sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest()
+    assert re.fullmatch(r"sha256:[0-9a-f]{64}", manifest_item["baseline_hash"])
+    assert manifest_item["baseline_hash"] == expected_hash
+PY
+}
+
+create_legacy_fixture() {
+    fixture_target=$1
+    fixture_project_name=$2
+    python3 - "$repo_root/baselines/0.2.0" "$fixture_target" "$fixture_project_name" <<'PY'
+import json
+from pathlib import Path
+import sys
+
+baseline = Path(sys.argv[1])
+target = Path(sys.argv[2])
+project_name = sys.argv[3]
+for source in sorted(baseline.rglob("*")):
+    if not source.is_file():
+        continue
+    relative = source.relative_to(baseline)
+    destination = target / relative
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    text = source.read_text(encoding="utf-8-sig").replace("\r\n", "\n").replace("\r", "\n")
+    if relative.as_posix() == ".agents/workflow.json":
+        text = text.replace('"<PROJECT_NAME>"', json.dumps(project_name, ensure_ascii=False))
+    else:
+        text = text.replace("<PROJECT_NAME>", project_name)
+    destination.write_text(text, encoding="utf-8", newline="")
+PY
+}
+
+digest_deployed_tree() {
+    digest_root=$1
+    find "$digest_root" -type f \
+        ! -path "$digest_root/.project-flow/*" \
+        ! -path "$digest_root/.project-flow-backup/*" -print |
+        sort |
+        while IFS= read -r file; do
+            relative=${file#"$digest_root/"}
+            set -- $(cksum "$file")
+            printf '%s=%s:%s\n' "$relative" "$1" "$2"
+        done
+}
 
 ALLOW_PLACEHOLDERS=1 sh "$repo_root/scripts/validate.sh" "$repo_root"
 
@@ -67,9 +174,9 @@ grep -Eq '^name:[[:space:]]*bootstrap-project-flow[[:space:]]*$' "$bootstrap_ski
 }
 bootstrap_description=$(sed -n '2,/^---[[:space:]]*$/ { s/^description:[[:space:]]*//p; }' "$bootstrap_skill" | head -n 1)
 printf '%s\n' "$bootstrap_description" | grep -Eiq '(install|import)' &&
-    printf '%s\n' "$bootstrap_description" | grep -Eiq '(create|reuse)' &&
+    printf '%s\n' "$bootstrap_description" | grep -Eiq '(claim|adopt|make)' &&
     printf '%s\n' "$bootstrap_description" | grep -Eiq 'user-visible.*project hub' || {
-        echo "Bootstrap Skill description does not cover import and user-visible project hub creation or reuse." >&2
+        echo "Bootstrap Skill description does not cover import and current-task project hub adoption." >&2
         exit 1
     }
 grep -Fq 'set_thread_pinned' "$bootstrap_skill" || {
@@ -106,6 +213,28 @@ printf '%s\n' "$bootstrap_skill_flat" |
         echo "Bootstrap Skill does not compare the complete hubKey exactly during recovery." >&2
         exit 1
     }
+printf '%s\n' "$bootstrap_skill_flat" |
+    grep -Eiq '\[codex-project-flow:hub-claim:v1\].{0,180}projectId[[:space:]]*=.{1,160};[[:space:]]*hubTitle[[:space:]]*=' || {
+        echo "Bootstrap Skill does not define the interrupted current-task claim identity." >&2
+        exit 1
+    }
+grep -Fq 'separateHubMode' "$bootstrap_skill" || {
+    echo "Bootstrap Skill does not preserve the explicit separate-hub compatibility mode." >&2
+    exit 1
+}
+grep -Eiq '(omit|omitted).{0,40}threadId|threadId.{0,40}(omit|omitted)' "$bootstrap_skill" || {
+    echo "Bootstrap Skill does not describe the implicit current-task title operation." >&2
+    exit 1
+}
+grep -Eiq 'exhaust(ive|ively|ion)|prove exhaustion' "$bootstrap_skill" &&
+    grep -Eiq '(reaches|reached).{0,60}(requested )?limit.{0,100}stop|stop.{0,100}(reaches|reached).{0,60}(requested )?limit' "$bootstrap_skill" || {
+        echo "Bootstrap Skill does not require exhaustive task discovery before claiming a hub." >&2
+        exit 1
+    }
+grep -Eiq 'never call `?create_thread`?.{0,120}(failed|ambiguous)|failed.{0,120}never call `?create_thread`?' "$bootstrap_skill" || {
+    echo "Bootstrap Skill does not forbid silent create_thread fallback after claim failure." >&2
+    exit 1
+}
 grep -Eiq '(queued|clientThreadId).*(do not|never|not to).*(call[[:space:]]+)?[^[:alnum:]_[:space:]]?create_thread[^[:alnum:]_[:space:]]?[[:space:]]+again' "$bootstrap_skill" || {
         echo "Bootstrap Skill queued handling does not forbid another create_thread call." >&2
         exit 1
@@ -117,6 +246,10 @@ grep -Eiq '(queued|clientThreadId).*(do not|never|not to).*(immediate(ly)?[[:spa
 bootstrap_default_prompt=$(sed -n 's/^[[:space:]][[:space:]]*default_prompt:[[:space:]]*//p' "$bootstrap_openai_yaml" | head -n 1)
 printf '%s\n' "$bootstrap_default_prompt" | grep -Fq '$bootstrap-project-flow' || {
     echo 'Bootstrap openai.yaml default_prompt does not reference $bootstrap-project-flow.' >&2
+    exit 1
+}
+printf '%s\n' "$bootstrap_default_prompt" | grep -Eiq '(claim|adopt).{0,80}(this|current).{0,40}(task|hub)|(this|current).{0,40}task.{0,80}(claim|adopt)' || {
+    echo "Bootstrap openai.yaml default_prompt does not make current-task hub adoption the default." >&2
     exit 1
 }
 
@@ -132,6 +265,10 @@ if cmp -s "$state_template" "$source_state"; then
 fi
 
 sh "$repo_root/scripts/install.sh" "$empty_target" "$special_project_name"
+assert_manifest_contract "$empty_target" "$special_project_name" || {
+    echo "Clean installation did not create a valid 0.3 manifest with the exact managed paths." >&2
+    exit 1
+}
 
 installed_state="$empty_target/docs/PROJECT_STATE.md"
 cmp -s "$installed_state" "$state_template" || {
@@ -153,6 +290,32 @@ sh "$repo_root/scripts/validate.sh" "$empty_target" || {
     echo "Installed-project validation incorrectly required plugin packaging files." >&2
     exit 1
 }
+[ -f "$empty_target/.agents/prompts/09_execution_handoff.md" ] || {
+    echo "Installer did not copy the execution-task handoff prompt." >&2
+    exit 1
+}
+rotation_key_format='[codex-project-flow:execution:v1] projectId=<exactProjectId>; hubThreadId=<exactHubThreadId>; predecessorThreadId=<exactPredecessorThreadId>; generation=<positiveInteger>'
+for rotation_identity_file in \
+    "$empty_target/.agents/workflow.json" \
+    "$empty_target/.agents/prompts/00_project_hub.md" \
+    "$empty_target/.agents/prompts/09_execution_handoff.md"
+do
+    grep -Fq "$rotation_key_format" "$rotation_identity_file" || {
+        echo "Execution-task rotation identity is missing from $rotation_identity_file" >&2
+        exit 1
+    }
+done
+
+valid_hub_prompt=$(cat "$empty_target/.agents/prompts/00_project_hub.md")
+cp "$repo_root/baselines/0.2.0/.agents/prompts/00_project_hub.md" \
+    "$empty_target/.agents/prompts/00_project_hub.md"
+printf '\n[codex-project-flow:execution:v1] manually merged rotation identity\n' >> \
+    "$empty_target/.agents/prompts/00_project_hub.md"
+if sh "$repo_root/scripts/validate.sh" "$empty_target" >/dev/null 2>&1; then
+    echo "Validator accepted a legacy hub prompt with only a fake rotation marker." >&2
+    exit 1
+fi
+printf '%s\n' "$valid_hub_prompt" > "$empty_target/.agents/prompts/00_project_hub.md"
 
 grep -Fq '"name": "Quote \"value\" Backslash \\ Ampersand & Pipe |"' "$empty_target/.agents/workflow.json" || {
     echo "JSON project name rendering failed for special characters." >&2
@@ -216,6 +379,39 @@ if sh "$repo_root/scripts/validate.sh" "$empty_target"; then
     echo "Validator accepted project_hub_occupies_active_task_slot set to true." >&2
     exit 1
 fi
+printf '%s\n' "$valid_config" |
+    sed 's/"task_rotation": "separate"/"task_rotation": "combined"/' > "$empty_target/.agents/workflow.json"
+if sh "$repo_root/scripts/validate.sh" "$empty_target"; then
+    echo "Validator accepted task_rotation without separate authorization." >&2
+    exit 1
+fi
+printf '%s\n' "$valid_config" |
+    sed 's/"review_after_substantive_turns": 6/"review_after_substantive_turns": 5/' > "$empty_target/.agents/workflow.json"
+if sh "$repo_root/scripts/validate.sh" "$empty_target"; then
+    echo "Validator accepted an incorrect execution-task rotation review threshold." >&2
+    exit 1
+fi
+printf '%s\n' "$valid_config" |
+    sed 's/"archive_predecessor"/"create_second_active_task"/' > "$empty_target/.agents/workflow.json"
+if sh "$repo_root/scripts/validate.sh" "$empty_target"; then
+    echo "Validator accepted a rotation state machine without archive_predecessor." >&2
+    exit 1
+fi
+printf '%s\n' "$valid_config" > "$empty_target/.agents/workflow.json"
+python3 - "$empty_target/.agents/workflow.json" <<'PY'
+import json, sys
+path = sys.argv[1]
+data = json.load(open(path, encoding="utf-8"))
+states = data["task_policy"]["rotation"]["state_machine"]
+states[2], states[3] = states[3], states[2]
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(data, handle, ensure_ascii=False, indent=2)
+    handle.write("\n")
+PY
+if sh "$repo_root/scripts/validate.sh" "$empty_target"; then
+    echo "Validator accepted a reordered execution-task rotation state machine." >&2
+    exit 1
+fi
 printf '%s\n' "$valid_config" > "$empty_target/.agents/workflow.json"
 
 digest_tree() {
@@ -256,6 +452,24 @@ if find "$control_target" -mindepth 1 -print -quit | grep -q .; then
     echo "Installer wrote files before rejecting a line-feed project name." >&2
     exit 1
 fi
+
+printf '# Original project rules\n' > "$midwrite_target/AGENTS.md"
+mkdir -p "$midwrite_target/.agents"
+chmod 500 "$midwrite_target/.agents"
+midwrite_status=0
+sh "$repo_root/scripts/install.sh" --target "$midwrite_target" --project-name "Midwrite Project" --force >/dev/null 2>&1 ||
+    midwrite_status=$?
+chmod 700 "$midwrite_target/.agents"
+[ "$midwrite_status" -ne 0 ] || {
+    echo "Installer unexpectedly succeeded when a later managed-file write was blocked." >&2
+    exit 1
+}
+[ "$(cat "$midwrite_target/AGENTS.md")" = '# Original project rules' ] &&
+    [ ! -e "$midwrite_target/.agents/workflow.json" ] &&
+    [ ! -e "$midwrite_target/.project-flow/manifest.json" ] || {
+        echo "Installer did not roll back files written before a mid-install failure." >&2
+        exit 1
+    }
 
 if ln -s "$outside_target" "$link_target/.agents" 2>/dev/null &&
     [ -L "$link_target/.agents" ]; then
@@ -306,6 +520,29 @@ backup=$(find "$existing_target/.project-flow-backup" -type f -name AGENTS.md -p
     echo "Forced install did not preserve the existing AGENTS.md." >&2
     exit 1
 }
+printf '\nlocal reset candidate\n' >> "$existing_target/AGENTS.md"
+python3 - "$existing_target/.project-flow/manifest.json" <<'PY'
+import json, sys
+path = sys.argv[1]
+data = json.load(open(path, encoding="utf-8"))
+data["workflow_version"] = "9.9.9"
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(data, handle, ensure_ascii=False, indent=2)
+    handle.write("\n")
+PY
+sh "$repo_root/scripts/install.sh" "$existing_target" "Existing Project" --force
+assert_manifest_contract "$existing_target" "Existing Project" || {
+    echo "Forced reset did not replace a stale manifest with a valid current manifest." >&2
+    exit 1
+}
+grep -R -q 'local reset candidate' "$existing_target/.project-flow-backup" || {
+    echo "Forced reset did not back up the customized live file." >&2
+    exit 1
+}
+grep -R -q '"workflow_version": "9.9.9"' "$existing_target/.project-flow-backup" || {
+    echo "Forced reset did not back up the stale manifest." >&2
+    exit 1
+}
 
 mkdir -p "$legacy_target/.agents/prompts"
 printf '# Legacy prompt\n' > "$legacy_target/.agents/prompts/01_start_project.md"
@@ -314,5 +551,224 @@ sh "$repo_root/scripts/install.sh" "$legacy_target" "Legacy Project"
     echo "Installer destructively removed a legacy prompt." >&2
     exit 1
 }
+
+sh "$repo_root/scripts/install.sh" "$noop_invalid_target" "Invalid NOOP Project"
+python3 - "$noop_invalid_target/.project-flow/manifest.json" <<'PY'
+import json, sys
+path = sys.argv[1]
+data = json.load(open(path, encoding="utf-8"))
+data["files"][0]["policy"] = "seed_once"
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(data, handle, ensure_ascii=False, indent=2)
+    handle.write("\n")
+PY
+invalid_noop_status=0
+sh "$repo_root/scripts/upgrade.sh" --target "$noop_invalid_target" --apply >/dev/null 2>&1 || invalid_noop_status=$?
+[ "$invalid_noop_status" -ne 0 ] || {
+    echo "Upgrade reported NOOP for a manifest with an invalid source/policy contract." >&2
+    exit 1
+}
+[ ! -d "$noop_invalid_target/.project-flow/transactions" ] || {
+    echo "Rejected invalid NOOP unexpectedly created a transaction." >&2
+    exit 1
+}
+
+legacy_project_name="Legacy Upgrade Project"
+create_legacy_fixture "$upgrade_target" "$legacy_project_name"
+printf '# Project state\n\nlegacy state must survive upgrade\n' > "$upgrade_target/docs/PROJECT_STATE.md"
+legacy_state_before=$(cat "$upgrade_target/docs/PROJECT_STATE.md")
+legacy_tree_before=$(digest_deployed_tree "$upgrade_target")
+
+missing_adopt_status=0
+missing_adopt_output=$(sh "$repo_root/scripts/upgrade.sh" --target "$upgrade_target" --plan 2>&1) || missing_adopt_status=$?
+[ "$missing_adopt_status" -ne 0 ] || {
+    echo "Legacy upgrade did not require explicit --adopt-from 0.2.0." >&2
+    exit 1
+}
+[ ! -e "$upgrade_target/.project-flow/manifest.json" ] || {
+    echo "Rejected legacy upgrade unexpectedly created a manifest." >&2
+    exit 1
+}
+
+legacy_plan=$(sh "$repo_root/scripts/upgrade.sh" --target "$upgrade_target" --adopt-from 0.2.0 --plan)
+printf '%s\n' "$legacy_plan" | grep -Fq 'UPGRADE 0.2.0 -> 0.3.0' || {
+    echo "Legacy adoption plan did not report the 0.2.0 to 0.3.0 migration." >&2
+    exit 1
+}
+printf '%s\n' "$legacy_plan" | grep -Eq '^CREATE[[:space:]]+replace_if_unmodified[[:space:]]+\.agents/prompts/09_execution_handoff\.md$' || {
+    echo "Legacy adoption plan did not create the execution-task handoff prompt." >&2
+    exit 1
+}
+printf '%s\n' "$legacy_plan" | grep -Eq '^PRESERVE[[:space:]]+seed_once[[:space:]]+docs/PROJECT_STATE\.md$' || {
+    echo "Legacy adoption plan did not preserve docs/PROJECT_STATE.md." >&2
+    exit 1
+}
+[ "$(digest_deployed_tree "$upgrade_target")" = "$legacy_tree_before" ] &&
+    [ ! -e "$upgrade_target/.project-flow/manifest.json" ] || {
+        echo "Legacy adoption plan mutated live files or created a manifest." >&2
+        exit 1
+    }
+
+create_legacy_fixture "$fake_handoff_target" "Fake Handoff Project"
+printf '%s\n' "$rotation_key_format" > \
+    "$fake_handoff_target/.agents/prompts/09_execution_handoff.md"
+fake_handoff_tree_before=$(digest_deployed_tree "$fake_handoff_target")
+fake_handoff_status=0
+sh "$repo_root/scripts/upgrade.sh" \
+    --target "$fake_handoff_target" \
+    --adopt-from 0.2.0 \
+    --apply \
+    --accept-local .agents/prompts/09_execution_handoff.md >/dev/null 2>&1 ||
+    fake_handoff_status=$?
+[ "$fake_handoff_status" -ne 0 ] || {
+    echo "Upgrade accepted a fake local execution handoff containing only the rotation key." >&2
+    exit 1
+}
+[ "$(digest_deployed_tree "$fake_handoff_target")" = "$fake_handoff_tree_before" ] &&
+    [ ! -e "$fake_handoff_target/.project-flow/manifest.json" ] || {
+        echo "Rejected fake execution handoff was not rolled back completely." >&2
+        exit 1
+    }
+
+plugin_copy="$test_root/plugin-copy"
+outside_baselines="$test_root/outside-baselines"
+cp -R "$repo_root" "$plugin_copy"
+mkdir -p "$outside_baselines/docs"
+cp "$repo_root/baselines/0.2.0/docs/"*.md "$outside_baselines/docs/"
+rm -rf "$plugin_copy/baselines/0.2.0/docs"
+if ln -s "$outside_baselines/docs" "$plugin_copy/baselines/0.2.0/docs" 2>/dev/null &&
+    [ -L "$plugin_copy/baselines/0.2.0/docs" ]; then
+    create_legacy_fixture "$plugin_link_target" "Linked Baseline Project"
+    linked_baseline_status=0
+    sh "$plugin_copy/scripts/upgrade.sh" --target "$plugin_link_target" --adopt-from 0.2.0 --plan >/dev/null 2>&1 ||
+        linked_baseline_status=$?
+    [ "$linked_baseline_status" -ne 0 ] || {
+        echo "Upgrade accepted an immutable baseline through a symbolic-link ancestor." >&2
+        exit 1
+    }
+else
+    echo "SKIP  baseline ancestor symbolic-link subtest (link creation unavailable)"
+fi
+
+cmp -s "$repo_root/baselines/0.2.0/.agents/prompts/00_project_hub.md" "$repo_root/.agents/prompts/00_project_hub.md" && {
+    echo "Upgrade fixture cannot prove replacement because the old and new hub prompts are identical." >&2
+    exit 1
+}
+legacy_apply=$(sh "$repo_root/scripts/upgrade.sh" --target "$upgrade_target" --adopt-from 0.2.0 --apply)
+legacy_transaction=$(printf '%s\n' "$legacy_apply" | sed -n 's/^APPLIED \([A-Za-z0-9][A-Za-z0-9._-]*\)$/\1/p' | tail -n 1)
+[ -n "$legacy_transaction" ] && [ -f "$upgrade_target/.project-flow/transactions/$legacy_transaction/transaction.json" ] || {
+    echo "Legacy adoption apply did not report a durable transaction." >&2
+    exit 1
+}
+cmp -s "$upgrade_target/.agents/prompts/00_project_hub.md" "$repo_root/.agents/prompts/00_project_hub.md" || {
+    echo "An unchanged legacy managed file was not updated to the 0.3 source." >&2
+    exit 1
+}
+cmp -s "$upgrade_target/.agents/prompts/09_execution_handoff.md" "$repo_root/.agents/prompts/09_execution_handoff.md" || {
+    echo "Legacy adoption did not install the 0.3 execution-task handoff prompt." >&2
+    exit 1
+}
+[ "$(cat "$upgrade_target/docs/PROJECT_STATE.md")" = "$legacy_state_before" ] || {
+    echo "Legacy adoption changed docs/PROJECT_STATE.md." >&2
+    exit 1
+}
+assert_manifest_contract "$upgrade_target" "$legacy_project_name" || {
+    echo "Legacy adoption did not create a valid 0.3 manifest." >&2
+    exit 1
+}
+manifest_transaction=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["last_transaction"])' "$upgrade_target/.project-flow/manifest.json")
+[ "$manifest_transaction" = "$legacy_transaction" ] || {
+    echo "Legacy adoption manifest does not reference its applied transaction." >&2
+    exit 1
+}
+
+transaction_count_before=$(find "$upgrade_target/.project-flow/transactions" -mindepth 1 -maxdepth 1 -type d -print | wc -l | tr -d ' ')
+manifest_digest_before=$(cksum "$upgrade_target/.project-flow/manifest.json")
+noop_output=$(sh "$repo_root/scripts/upgrade.sh" --target "$upgrade_target" --apply)
+printf '%s\n' "$noop_output" | grep -Fq 'NOOP already up to date' || {
+    echo "Second upgrade apply did not report NOOP." >&2
+    exit 1
+}
+transaction_count_after=$(find "$upgrade_target/.project-flow/transactions" -mindepth 1 -maxdepth 1 -type d -print | wc -l | tr -d ' ')
+[ "$transaction_count_after" = "$transaction_count_before" ] &&
+    [ "$(cksum "$upgrade_target/.project-flow/manifest.json")" = "$manifest_digest_before" ] || {
+        echo "NOOP apply created a transaction or changed the manifest." >&2
+        exit 1
+    }
+
+rollback_output=$(sh "$repo_root/scripts/upgrade.sh" --target "$upgrade_target" --rollback "$legacy_transaction")
+printf '%s\n' "$rollback_output" | grep -Fq "ROLLED_BACK $legacy_transaction" || {
+    echo "Upgrade rollback did not report the restored transaction." >&2
+    exit 1
+}
+[ "$(digest_deployed_tree "$upgrade_target")" = "$legacy_tree_before" ] || {
+    echo "Rollback did not restore the complete pre-upgrade deployed state." >&2
+    exit 1
+}
+[ ! -e "$upgrade_target/.project-flow/manifest.json" ] &&
+    [ ! -e "$upgrade_target/.agents/prompts/09_execution_handoff.md" ] || {
+        echo "Rollback did not restore the pre-adoption manifest and file set." >&2
+        exit 1
+    }
+
+create_legacy_fixture "$conflict_target" "Conflict Upgrade Project"
+printf '\nlocal project-hub customization\n' >> "$conflict_target/.agents/prompts/00_project_hub.md"
+conflict_tree_before=$(digest_deployed_tree "$conflict_target")
+conflict_status=0
+conflict_output=$(sh "$repo_root/scripts/upgrade.sh" --target "$conflict_target" --adopt-from 0.2.0 --apply 2>&1) || conflict_status=$?
+[ "$conflict_status" -eq 4 ] || {
+    echo "Conflicting legacy adoption returned $conflict_status instead of 4: $conflict_output" >&2
+    exit 1
+}
+[ "$(digest_deployed_tree "$conflict_target")" = "$conflict_tree_before" ] &&
+    [ ! -e "$conflict_target/.project-flow/manifest.json" ] || {
+        echo "Conflict handling changed live managed files or the manifest." >&2
+        exit 1
+    }
+find "$conflict_target/.project-flow/staging" -type f -name plan.json -print -quit | grep -q . || {
+    echo "Conflict handling did not create a reviewable staging plan." >&2
+    exit 1
+}
+
+cp "$repo_root/.agents/prompts/00_project_hub.md" \
+    "$conflict_target/.agents/prompts/00_project_hub.md"
+printf '\nlocal project-hub customization retained after manual merge\n' >> \
+    "$conflict_target/.agents/prompts/00_project_hub.md"
+conflict_hub_before=$(cat "$conflict_target/.agents/prompts/00_project_hub.md")
+accepted_tree_before=$(digest_deployed_tree "$conflict_target")
+accepted_output=$(sh "$repo_root/scripts/upgrade.sh" \
+    --target "$conflict_target" \
+    --adopt-from 0.2.0 \
+    --apply \
+    --accept-local .agents/prompts/00_project_hub.md)
+printf '%s\n' "$accepted_output" | grep -Eq '^ACCEPT[[:space:]]+replace_if_unmodified[[:space:]]+\.agents/prompts/00_project_hub\.md$' || {
+    echo "Explicit local conflict acceptance was not reported in the apply plan." >&2
+    exit 1
+}
+accepted_transaction=$(printf '%s\n' "$accepted_output" | sed -n 's/^APPLIED \([A-Za-z0-9][A-Za-z0-9._-]*\)$/\1/p' | tail -n 1)
+[ -n "$accepted_transaction" ] || {
+    echo "Explicit local conflict acceptance did not create a transaction." >&2
+    exit 1
+}
+[ "$(cat "$conflict_target/.agents/prompts/00_project_hub.md")" = "$conflict_hub_before" ] || {
+    echo "Explicit local conflict acceptance overwrote the reviewed live file." >&2
+    exit 1
+}
+assert_manifest_contract "$conflict_target" "Conflict Upgrade Project" || {
+    echo "Explicit local conflict acceptance did not advance to a valid 0.3 manifest." >&2
+    exit 1
+}
+python3 - "$conflict_target/.project-flow/transactions/$accepted_transaction/transaction.json" <<'PY'
+import json, sys
+data = json.load(open(sys.argv[1], encoding="utf-8"))
+assert data["accepted_local"] == [".agents/prompts/00_project_hub.md"]
+PY
+
+sh "$repo_root/scripts/upgrade.sh" --target "$conflict_target" --rollback "$accepted_transaction" >/dev/null
+[ "$(digest_deployed_tree "$conflict_target")" = "$accepted_tree_before" ] &&
+    [ ! -e "$conflict_target/.project-flow/manifest.json" ] || {
+        echo "Rollback after local conflict acceptance did not restore the pre-acceptance state." >&2
+        exit 1
+    }
 
 echo "All POSIX shell tests passed."

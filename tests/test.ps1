@@ -2,13 +2,18 @@ $ErrorActionPreference = "Stop"
 $repoRoot = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 $install = Join-Path $repoRoot "scripts/install.ps1"
 $validate = Join-Path $repoRoot "scripts/validate.ps1"
+$upgrade = Join-Path $repoRoot "scripts/upgrade.ps1"
 $testRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("codex-project-flow-" + [guid]::NewGuid().ToString("N"))
 $emptyTarget = Join-Path $testRoot "empty-project"
 $existingTarget = Join-Path $testRoot "existing-project"
 $legacyTarget = Join-Path $testRoot "legacy-project"
+$upgradeTarget = Join-Path $testRoot "upgrade-project"
+$conflictTarget = Join-Path $testRoot "conflict-project"
+$noopInvalidTarget = Join-Path $testRoot "noop-invalid-project"
 $controlTarget = Join-Path $testRoot "control-project"
 $linkTarget = Join-Path $testRoot "link-project"
 $outsideTarget = Join-Path $testRoot "outside-project"
+$fakeHandoffTarget = Join-Path $testRoot "fake-handoff-project"
 $createdReparsePaths = New-Object System.Collections.Generic.List[string]
 $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 $specialProjectName = 'Quote "value" Backslash \ Ampersand & Pipe |'
@@ -24,13 +29,114 @@ function Get-ManagedDigest([string]$Root) {
     return ($items -join "`n")
 }
 
+function Get-NormalizedText([string]$Path) {
+    $text = [System.IO.File]::ReadAllText($Path)
+    if ($text.Length -gt 0 -and $text[0] -eq [char]0xFEFF) { $text = $text.Substring(1) }
+    return $text.Replace("`r`n", "`n").Replace("`r", "`n")
+}
+
+function Get-NormalizedTextHash([string]$Text) {
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $bytes = [System.Text.Encoding]::UTF8.GetBytes($Text)
+        return "sha256:" + ([System.BitConverter]::ToString($sha.ComputeHash($bytes))).Replace("-", "").ToLowerInvariant()
+    } finally {
+        $sha.Dispose()
+    }
+}
+
+function Assert-ManifestContract([string]$Target, [string]$ProjectName) {
+    $managed = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $repoRoot "managed-files.json") |
+        ConvertFrom-Json
+    $manifestPath = Join-Path $Target ".project-flow/manifest.json"
+    if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
+        throw "Manifest is missing: $manifestPath"
+    }
+    $manifest = Get-Content -Raw -Encoding UTF8 -LiteralPath $manifestPath | ConvertFrom-Json
+    if ($managed.workflow_version -cne "0.3.0" -or $manifest.schema_version -ne 1 -or
+        $manifest.workflow_version -cne $managed.workflow_version -or $manifest.project_name -cne $ProjectName) {
+        throw "Manifest metadata is inconsistent with managed-files.json."
+    }
+    if ([string]::IsNullOrWhiteSpace([string]$manifest.installed_at_utc)) {
+        throw "Manifest installation timestamp is missing."
+    }
+    if ($manifest.PSObject.Properties.Name -notcontains "last_transaction") {
+        throw "Manifest last_transaction field is missing."
+    }
+    if ($null -ne $manifest.last_transaction -and
+        [string]$manifest.last_transaction -cnotmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$') {
+        throw "Manifest last_transaction is invalid."
+    }
+    $expected = @($managed.files)
+    $actual = @($manifest.files)
+    if ($actual.Count -ne $expected.Count) { throw "Manifest managed path count is incorrect." }
+    for ($index = 0; $index -lt $expected.Count; $index++) {
+        if ($actual[$index].path -cne $expected[$index].path -or
+            $actual[$index].source -cne $expected[$index].source -or
+            $actual[$index].policy -cne $expected[$index].policy) {
+            throw "Manifest managed paths do not exactly match managed-files.json."
+        }
+        $sourceText = Get-NormalizedText (Join-Path $repoRoot ([string]$expected[$index].source))
+        if ($expected[$index].render -ceq "project_name_json") {
+            $replacement = ConvertTo-Json -InputObject $ProjectName -Compress
+            $sourceText = $sourceText.Replace('"<PROJECT_NAME>"', $replacement)
+        } else {
+            $sourceText = $sourceText.Replace("<PROJECT_NAME>", $ProjectName)
+        }
+        $expectedHash = Get-NormalizedTextHash $sourceText
+        if ([string]$actual[$index].baseline_hash -cnotmatch '^sha256:[0-9a-f]{64}$' -or
+            $actual[$index].baseline_hash -cne $expectedHash) {
+            throw "Manifest baseline hash is invalid for $($expected[$index].path)."
+        }
+    }
+    if (@($actual | Where-Object { $_.path -ceq ".agents/prompts/09_execution_handoff.md" }).Count -ne 1) {
+        throw "Manifest does not manage the execution-task handoff prompt exactly once."
+    }
+}
+
+function New-LegacyFixture([string]$Target, [string]$ProjectName) {
+    $baselineRoot = Join-Path $repoRoot "baselines/0.2.0"
+    Get-ChildItem -LiteralPath $baselineRoot -Recurse -File | Sort-Object FullName | ForEach-Object {
+        $relative = $_.FullName.Substring($baselineRoot.Length).TrimStart('\', '/')
+        $destination = Join-Path $Target $relative
+        [System.IO.Directory]::CreateDirectory((Split-Path -Parent $destination)) | Out-Null
+        $text = Get-NormalizedText $_.FullName
+        if ($relative.Replace('\', '/') -ceq ".agents/workflow.json") {
+            $replacement = ConvertTo-Json -InputObject $ProjectName -Compress
+            $text = $text.Replace('"<PROJECT_NAME>"', $replacement)
+        } else {
+            $text = $text.Replace("<PROJECT_NAME>", $ProjectName)
+        }
+        [System.IO.File]::WriteAllText($destination, $text, $utf8NoBom)
+    }
+}
+
+function Get-DeployedDigest([string]$Root) {
+    $items = Get-ChildItem -LiteralPath $Root -Recurse -File |
+        Where-Object {
+            $relative = $_.FullName.Substring($Root.Length).TrimStart('\', '/').Replace('\', '/')
+            -not $relative.StartsWith(".project-flow/") -and
+                -not $relative.StartsWith(".project-flow-backup/")
+        } |
+        Sort-Object FullName |
+        ForEach-Object {
+            $relative = $_.FullName.Substring($Root.Length).TrimStart('\', '/').Replace('\', '/')
+            "$relative=$((Get-FileHash -Algorithm SHA256 -LiteralPath $_.FullName).Hash)"
+        }
+    return ($items -join "`n")
+}
+
 try {
     [System.IO.Directory]::CreateDirectory($emptyTarget) | Out-Null
     [System.IO.Directory]::CreateDirectory($existingTarget) | Out-Null
     [System.IO.Directory]::CreateDirectory($legacyTarget) | Out-Null
+    [System.IO.Directory]::CreateDirectory($upgradeTarget) | Out-Null
+    [System.IO.Directory]::CreateDirectory($conflictTarget) | Out-Null
+    [System.IO.Directory]::CreateDirectory($noopInvalidTarget) | Out-Null
     [System.IO.Directory]::CreateDirectory($controlTarget) | Out-Null
     [System.IO.Directory]::CreateDirectory($linkTarget) | Out-Null
     [System.IO.Directory]::CreateDirectory($outsideTarget) | Out-Null
+    [System.IO.Directory]::CreateDirectory($fakeHandoffTarget) | Out-Null
 
     & $validate -Target $repoRoot -AllowPlaceholders
     if ($LASTEXITCODE -ne 0) {
@@ -79,10 +185,10 @@ try {
     ).Groups["value"].Value
     if (
         $bootstrapDescription -notmatch '(?i)\b(?:install|import)\w*\b' -or
-        $bootstrapDescription -notmatch '(?i)\b(?:create|reuse)\w*\b' -or
+        $bootstrapDescription -notmatch '(?i)\b(?:claim|adopt|make)\w*\b' -or
         $bootstrapDescription -notmatch '(?i)\buser-visible\b.*\bproject hub\b'
     ) {
-        throw "Bootstrap Skill description does not cover import and user-visible project hub creation or reuse."
+        throw "Bootstrap Skill description does not cover import and current-task project hub adoption."
     }
     if ($bootstrapSkillText -notmatch [regex]::Escape('set_thread_pinned')) {
         throw "Bootstrap Skill does not call set_thread_pinned for the permanent project hub."
@@ -123,6 +229,21 @@ try {
     }
     if (
         $bootstrapSkillText -notmatch
+            '(?is)\[codex-project-flow:hub-claim:v1\].{0,180}\bprojectId\s*=.{1,160};\s*hubTitle\s*='
+    ) {
+        throw "Bootstrap Skill does not define the interrupted current-task claim identity."
+    }
+    if ($bootstrapSkillText -notmatch '\bseparateHubMode\b') {
+        throw "Bootstrap Skill does not preserve the explicit separate-hub compatibility mode."
+    }
+    if ($bootstrapSkillText -notmatch '(?is)(?:omit|omitted).{0,40}threadId|threadId.{0,40}(?:omit|omitted)') {
+        throw "Bootstrap Skill does not describe the implicit current-task title operation."
+    }
+    if ($bootstrapSkillText -notmatch '(?is)never call `?create_thread`?.{0,160}(?:failed|ambiguous)') {
+        throw "Bootstrap Skill does not forbid silent create_thread fallback after claim failure."
+    }
+    if (
+        $bootstrapSkillText -notmatch
             '(?im)^[^\r\n]*(?:queued|clientThreadId)[^\r\n]*(?:do not|never|not to)[^\r\n]*(?:call\s+)?[^\w\s]?create_thread[^\w\s]?\s+again[^\r\n]*$'
     ) {
         throw "Bootstrap Skill queued handling does not forbid another create_thread call."
@@ -141,6 +262,9 @@ try {
     if ($bootstrapDefaultPrompt -notmatch [regex]::Escape('$bootstrap-project-flow')) {
         throw "Bootstrap openai.yaml default_prompt does not reference `$bootstrap-project-flow."
     }
+    if ($bootstrapDefaultPrompt -notmatch '(?i)(?:claim|adopt).{0,80}(?:this|current).{0,40}(?:task|hub)|(?:this|current).{0,40}task.{0,80}(?:claim|adopt)') {
+        throw "Bootstrap openai.yaml default_prompt does not make current-task hub adoption the default."
+    }
 
     $stateTemplatePath = Join-Path $repoRoot "templates/PROJECT_STATE.md"
     $sourceStatePath = Join-Path $repoRoot "docs/PROJECT_STATE.md"
@@ -157,6 +281,7 @@ try {
     if ($LASTEXITCODE -ne 0) {
         throw "Empty-project installation failed."
     }
+    Assert-ManifestContract $emptyTarget $specialProjectName
     $installedStateText = [System.IO.File]::ReadAllText(
         (Join-Path $emptyTarget "docs/PROJECT_STATE.md")
     )
@@ -175,6 +300,32 @@ try {
     if ($LASTEXITCODE -ne 0) {
         throw "Installed-project validation incorrectly required plugin packaging files."
     }
+    if (-not (Test-Path -LiteralPath (Join-Path $emptyTarget ".agents/prompts/09_execution_handoff.md") -PathType Leaf)) {
+        throw "Installer did not copy the execution-task handoff prompt."
+    }
+    $rotationKeyFormat = '[codex-project-flow:execution:v1] projectId=<exactProjectId>; hubThreadId=<exactHubThreadId>; predecessorThreadId=<exactPredecessorThreadId>; generation=<positiveInteger>'
+    foreach ($rotationIdentityRelative in @(
+        ".agents/workflow.json",
+        ".agents/prompts/00_project_hub.md",
+        ".agents/prompts/09_execution_handoff.md"
+    )) {
+        if (-not [System.IO.File]::ReadAllText((Join-Path $emptyTarget $rotationIdentityRelative)).Contains($rotationKeyFormat)) {
+            throw "Execution-task rotation identity is missing from $rotationIdentityRelative"
+        }
+    }
+    $installedHubPromptPath = Join-Path $emptyTarget ".agents/prompts/00_project_hub.md"
+    $validHubPrompt = [System.IO.File]::ReadAllText($installedHubPromptPath)
+    [System.IO.File]::WriteAllText(
+        $installedHubPromptPath,
+        ([System.IO.File]::ReadAllText((Join-Path $repoRoot "baselines/0.2.0/.agents/prompts/00_project_hub.md")) +
+            "`n[codex-project-flow:execution:v1] manually merged rotation identity`n"),
+        $utf8NoBom
+    )
+    & $validate -Target $emptyTarget *> $null
+    if ($LASTEXITCODE -eq 0) {
+        throw "Validator accepted a legacy hub prompt with only a fake rotation marker."
+    }
+    [System.IO.File]::WriteAllText($installedHubPromptPath, $validHubPrompt, $utf8NoBom)
     $config = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $emptyTarget ".agents/workflow.json") |
         ConvertFrom-Json
     if ($config.project.name -cne $specialProjectName) {
@@ -276,6 +427,41 @@ try {
             Mutate = {
                 param($Workflow)
                 $Workflow.task_policy.project_hub_occupies_active_task_slot = $true
+            }
+        },
+        @{
+            Name = "task_rotation without separate authorization"
+            Mutate = {
+                param($Workflow)
+                $Workflow.authorization.task_rotation = "combined"
+            }
+        },
+        @{
+            Name = "an incorrect execution-task rotation review threshold"
+            Mutate = {
+                param($Workflow)
+                $Workflow.task_policy.rotation.review_after_substantive_turns = 5
+            }
+        },
+        @{
+            Name = "a rotation state machine without archive_predecessor"
+            Mutate = {
+                param($Workflow)
+                $Workflow.task_policy.rotation.state_machine = @(
+                    $Workflow.task_policy.rotation.state_machine |
+                        Where-Object { $_ -cne "archive_predecessor" }
+                )
+            }
+        },
+        @{
+            Name = "a reordered execution-task rotation state machine"
+            Mutate = {
+                param($Workflow)
+                $states = @($Workflow.task_policy.rotation.state_machine)
+                $temporaryState = $states[2]
+                $states[2] = $states[3]
+                $states[3] = $temporaryState
+                $Workflow.task_policy.rotation.state_machine = $states
             }
         }
     )
@@ -424,6 +610,20 @@ try {
     if (-not $backup -or [System.IO.File]::ReadAllText($backup.FullName) -ne "# Existing project rules`n") {
         throw "Forced installation did not preserve the existing AGENTS.md backup."
     }
+    [System.IO.File]::AppendAllText($existingAgents, "`nlocal reset candidate`n", $utf8NoBom)
+    $existingManifestPath = Join-Path $existingTarget ".project-flow/manifest.json"
+    $staleManifest = Get-Content -Raw -Encoding UTF8 -LiteralPath $existingManifestPath | ConvertFrom-Json
+    $staleManifest.workflow_version = "9.9.9"
+    [System.IO.File]::WriteAllText($existingManifestPath, ($staleManifest | ConvertTo-Json -Depth 20) + "`n", $utf8NoBom)
+    & $install -Target $existingTarget -ProjectName "Existing Project" -Force
+    if ($LASTEXITCODE -ne 0) { throw "Forced reset failed to replace a stale manifest." }
+    Assert-ManifestContract $existingTarget "Existing Project"
+    $backupText = @(Get-ChildItem -LiteralPath (Join-Path $existingTarget ".project-flow-backup") -Recurse -File | ForEach-Object {
+        [System.IO.File]::ReadAllText($_.FullName)
+    }) -join "`n"
+    if ($backupText -notmatch 'local reset candidate' -or $backupText -notmatch '"workflow_version"\s*:\s*"9\.9\.9"') {
+        throw "Forced reset did not back up the customized file and stale manifest."
+    }
 
     $legacyPrompt = Join-Path $legacyTarget ".agents/prompts/01_start_project.md"
     [System.IO.Directory]::CreateDirectory((Split-Path -Parent $legacyPrompt)) | Out-Null
@@ -434,6 +634,190 @@ try {
     }
     if (-not (Test-Path -LiteralPath $legacyPrompt -PathType Leaf)) {
         throw "Installer destructively removed a legacy prompt."
+    }
+
+    & $install -Target $noopInvalidTarget -ProjectName "Invalid NOOP Project"
+    if ($LASTEXITCODE -ne 0) { throw "Invalid-NOOP fixture installation failed." }
+    $noopManifestPath = Join-Path $noopInvalidTarget ".project-flow/manifest.json"
+    $invalidNoopManifest = Get-Content -Raw -Encoding UTF8 -LiteralPath $noopManifestPath | ConvertFrom-Json
+    $invalidNoopManifest.files[0].policy = "seed_once"
+    [System.IO.File]::WriteAllText($noopManifestPath, ($invalidNoopManifest | ConvertTo-Json -Depth 20) + "`n", $utf8NoBom)
+    $invalidNoopRejected = $false
+    try {
+        & $upgrade -Target $noopInvalidTarget -Apply *> $null
+        $invalidNoopRejected = $LASTEXITCODE -ne 0
+    } catch {
+        $invalidNoopRejected = $true
+    }
+    if (-not $invalidNoopRejected) { throw "Upgrade reported NOOP for an invalid manifest contract." }
+    if (Test-Path -LiteralPath (Join-Path $noopInvalidTarget ".project-flow/transactions")) {
+        throw "Rejected invalid NOOP unexpectedly created a transaction."
+    }
+
+    $legacyProjectName = "Legacy Upgrade Project"
+    New-LegacyFixture $upgradeTarget $legacyProjectName
+    $legacyStatePath = Join-Path $upgradeTarget "docs/PROJECT_STATE.md"
+    [System.IO.File]::WriteAllText(
+        $legacyStatePath,
+        "# Project state`n`nlegacy state must survive upgrade`n",
+        $utf8NoBom
+    )
+    $legacyStateBefore = [System.IO.File]::ReadAllText($legacyStatePath)
+    $legacyTreeBefore = Get-DeployedDigest $upgradeTarget
+
+    $missingAdoptRejected = $false
+    try {
+        & $upgrade -Target $upgradeTarget -Plan *> $null
+        $missingAdoptRejected = $LASTEXITCODE -ne 0
+    } catch {
+        $missingAdoptRejected = $true
+    }
+    if (-not $missingAdoptRejected) {
+        throw "Legacy upgrade did not require explicit -AdoptFrom 0.2.0."
+    }
+    if (Test-Path -LiteralPath (Join-Path $upgradeTarget ".project-flow/manifest.json")) {
+        throw "Rejected legacy upgrade unexpectedly created a manifest."
+    }
+
+    $legacyPlan = @(& $upgrade -Target $upgradeTarget -AdoptFrom "0.2.0" -Plan 2>&1 | ForEach-Object { $_.ToString() })
+    if ($LASTEXITCODE -ne 0) { throw "Legacy adoption plan failed." }
+    $legacyPlanText = $legacyPlan -join "`n"
+    if ($legacyPlanText -notmatch '(?m)^UPGRADE 0\.2\.0 -> 0\.3\.0$' -or
+        $legacyPlanText -notmatch '(?m)^CREATE\s+replace_if_unmodified\s+\.agents/prompts/09_execution_handoff\.md$' -or
+        $legacyPlanText -notmatch '(?m)^PRESERVE\s+seed_once\s+docs/PROJECT_STATE\.md$') {
+        throw "Legacy adoption plan did not expose the required 0.3 create and preserve decisions."
+    }
+    if ((Get-DeployedDigest $upgradeTarget) -cne $legacyTreeBefore -or
+        (Test-Path -LiteralPath (Join-Path $upgradeTarget ".project-flow/manifest.json"))) {
+        throw "Legacy adoption plan mutated live files or created a manifest."
+    }
+
+    New-LegacyFixture $fakeHandoffTarget "Fake Handoff Project"
+    $fakeHandoffPath = Join-Path $fakeHandoffTarget ".agents/prompts/09_execution_handoff.md"
+    [System.IO.File]::WriteAllText($fakeHandoffPath, "$rotationKeyFormat`n", $utf8NoBom)
+    $fakeHandoffTreeBefore = Get-DeployedDigest $fakeHandoffTarget
+    $fakeHandoffRejected = $false
+    try {
+        & $upgrade -Target $fakeHandoffTarget -AdoptFrom "0.2.0" -Apply `
+            -AcceptLocal ".agents/prompts/09_execution_handoff.md" *> $null
+        $fakeHandoffRejected = $LASTEXITCODE -ne 0
+    } catch {
+        $fakeHandoffRejected = $true
+    }
+    if (-not $fakeHandoffRejected) {
+        throw "Upgrade accepted a fake local execution handoff containing only the rotation key."
+    }
+    if ((Get-DeployedDigest $fakeHandoffTarget) -cne $fakeHandoffTreeBefore -or
+        (Test-Path -LiteralPath (Join-Path $fakeHandoffTarget ".project-flow/manifest.json"))) {
+        throw "Rejected fake execution handoff was not rolled back completely."
+    }
+
+    $oldHub = Join-Path $repoRoot "baselines/0.2.0/.agents/prompts/00_project_hub.md"
+    $newHub = Join-Path $repoRoot ".agents/prompts/00_project_hub.md"
+    if ([System.IO.File]::ReadAllText($oldHub) -ceq [System.IO.File]::ReadAllText($newHub)) {
+        throw "Upgrade fixture cannot prove replacement because the old and new hub prompts are identical."
+    }
+    $legacyApply = @(& $upgrade -Target $upgradeTarget -AdoptFrom "0.2.0" -Apply 2>&1 | ForEach-Object { $_.ToString() })
+    if ($LASTEXITCODE -ne 0) { throw "Legacy adoption apply failed." }
+    $transactionMatch = [regex]::Match(($legacyApply -join "`n"), '(?m)^APPLIED (?<id>[A-Za-z0-9][A-Za-z0-9._-]*)$')
+    if (-not $transactionMatch.Success) { throw "Legacy adoption apply did not report a transaction." }
+    $legacyTransaction = $transactionMatch.Groups["id"].Value
+    if (-not (Test-Path -LiteralPath (Join-Path $upgradeTarget ".project-flow/transactions/$legacyTransaction/transaction.json") -PathType Leaf)) {
+        throw "Legacy adoption transaction metadata is missing."
+    }
+    if ([System.IO.File]::ReadAllText((Join-Path $upgradeTarget ".agents/prompts/00_project_hub.md")) -cne
+        [System.IO.File]::ReadAllText($newHub)) {
+        throw "An unchanged legacy managed file was not updated to the 0.3 source."
+    }
+    if ([System.IO.File]::ReadAllText((Join-Path $upgradeTarget ".agents/prompts/09_execution_handoff.md")) -cne
+        [System.IO.File]::ReadAllText((Join-Path $repoRoot ".agents/prompts/09_execution_handoff.md"))) {
+        throw "Legacy adoption did not install the 0.3 execution-task handoff prompt."
+    }
+    if ([System.IO.File]::ReadAllText($legacyStatePath) -cne $legacyStateBefore) {
+        throw "Legacy adoption changed docs/PROJECT_STATE.md."
+    }
+    Assert-ManifestContract $upgradeTarget $legacyProjectName
+    $appliedManifest = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $upgradeTarget ".project-flow/manifest.json") |
+        ConvertFrom-Json
+    if ($appliedManifest.last_transaction -cne $legacyTransaction) {
+        throw "Legacy adoption manifest does not reference its applied transaction."
+    }
+
+    $transactionRoot = Join-Path $upgradeTarget ".project-flow/transactions"
+    $transactionCountBefore = @(Get-ChildItem -LiteralPath $transactionRoot -Directory).Count
+    $manifestPath = Join-Path $upgradeTarget ".project-flow/manifest.json"
+    $manifestDigestBefore = (Get-FileHash -Algorithm SHA256 -LiteralPath $manifestPath).Hash
+    $noopOutput = @(& $upgrade -Target $upgradeTarget -Apply 2>&1 | ForEach-Object { $_.ToString() })
+    if ($LASTEXITCODE -ne 0 -or ($noopOutput -join "`n") -notmatch '(?m)^NOOP already up to date$') {
+        throw "Second upgrade apply did not report NOOP."
+    }
+    if (@(Get-ChildItem -LiteralPath $transactionRoot -Directory).Count -ne $transactionCountBefore -or
+        (Get-FileHash -Algorithm SHA256 -LiteralPath $manifestPath).Hash -cne $manifestDigestBefore) {
+        throw "NOOP apply created a transaction or changed the manifest."
+    }
+
+    $rollbackOutput = @(& $upgrade -Target $upgradeTarget -Rollback $legacyTransaction 2>&1 | ForEach-Object { $_.ToString() })
+    if ($LASTEXITCODE -ne 0 -or ($rollbackOutput -join "`n") -notmatch "(?m)^ROLLED_BACK $([regex]::Escape($legacyTransaction))$") {
+        throw "Upgrade rollback did not report the restored transaction."
+    }
+    if ((Get-DeployedDigest $upgradeTarget) -cne $legacyTreeBefore) {
+        throw "Rollback did not restore the complete pre-upgrade deployed state."
+    }
+    if ((Test-Path -LiteralPath $manifestPath) -or
+        (Test-Path -LiteralPath (Join-Path $upgradeTarget ".agents/prompts/09_execution_handoff.md"))) {
+        throw "Rollback did not restore the pre-adoption manifest and file set."
+    }
+
+    New-LegacyFixture $conflictTarget "Conflict Upgrade Project"
+    $conflictHub = Join-Path $conflictTarget ".agents/prompts/00_project_hub.md"
+    [System.IO.File]::AppendAllText($conflictHub, "`nlocal project-hub customization`n", $utf8NoBom)
+    $conflictTreeBefore = Get-DeployedDigest $conflictTarget
+    $conflictOutput = @(& $upgrade -Target $conflictTarget -AdoptFrom "0.2.0" -Apply 2>&1 | ForEach-Object { $_.ToString() })
+    $conflictStatus = $LASTEXITCODE
+    if ($conflictStatus -ne 4) {
+        throw "Conflicting legacy adoption returned $conflictStatus instead of 4: $($conflictOutput -join ' ')"
+    }
+    if ((Get-DeployedDigest $conflictTarget) -cne $conflictTreeBefore -or
+        (Test-Path -LiteralPath (Join-Path $conflictTarget ".project-flow/manifest.json"))) {
+        throw "Conflict handling changed live managed files or the manifest."
+    }
+    $stagingPlans = @(Get-ChildItem -LiteralPath (Join-Path $conflictTarget ".project-flow/staging") -Recurse -File -Filter "plan.json")
+    if ($stagingPlans.Count -eq 0) { throw "Conflict handling did not create a reviewable staging plan." }
+
+    [System.IO.File]::WriteAllText(
+        $conflictHub,
+        ([System.IO.File]::ReadAllText((Join-Path $repoRoot ".agents/prompts/00_project_hub.md")) +
+            "`nlocal project-hub customization retained after manual merge`n"),
+        $utf8NoBom
+    )
+    $conflictHubBefore = [System.IO.File]::ReadAllText($conflictHub)
+    $acceptedTreeBefore = Get-DeployedDigest $conflictTarget
+    $acceptedOutput = @(
+        & $upgrade -Target $conflictTarget -AdoptFrom "0.2.0" -Apply -AcceptLocal ".agents/prompts/00_project_hub.md" 2>&1 |
+            ForEach-Object { $_.ToString() }
+    )
+    if ($LASTEXITCODE -ne 0 -or ($acceptedOutput -join "`n") -notmatch
+        '(?m)^ACCEPT\s+replace_if_unmodified\s+\.agents/prompts/00_project_hub\.md$') {
+        throw "Explicit local conflict acceptance was not reported in the apply plan."
+    }
+    $acceptedMatch = [regex]::Match(($acceptedOutput -join "`n"), '(?m)^APPLIED (?<id>[A-Za-z0-9][A-Za-z0-9._-]*)$')
+    if (-not $acceptedMatch.Success) { throw "Explicit local conflict acceptance did not create a transaction." }
+    $acceptedTransaction = $acceptedMatch.Groups["id"].Value
+    if ([System.IO.File]::ReadAllText($conflictHub) -cne $conflictHubBefore) {
+        throw "Explicit local conflict acceptance overwrote the reviewed live file."
+    }
+    Assert-ManifestContract $conflictTarget "Conflict Upgrade Project"
+    $acceptedMeta = Get-Content -Raw -Encoding UTF8 -LiteralPath (
+        Join-Path $conflictTarget ".project-flow/transactions/$acceptedTransaction/transaction.json"
+    ) | ConvertFrom-Json
+    if (@($acceptedMeta.accepted_local).Count -ne 1 -or
+        [string]$acceptedMeta.accepted_local[0] -cne ".agents/prompts/00_project_hub.md") {
+        throw "Accepted local path was not recorded in transaction metadata."
+    }
+    & $upgrade -Target $conflictTarget -Rollback $acceptedTransaction *> $null
+    if ($LASTEXITCODE -ne 0 -or (Get-DeployedDigest $conflictTarget) -cne $acceptedTreeBefore -or
+        (Test-Path -LiteralPath (Join-Path $conflictTarget ".project-flow/manifest.json"))) {
+        throw "Rollback after local conflict acceptance did not restore the pre-acceptance state."
     }
 
     Write-Host "All PowerShell tests passed."

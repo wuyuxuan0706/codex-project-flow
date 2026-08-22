@@ -1,0 +1,51 @@
+{
+  "schema_version": 1,
+  "project": {
+    "name": "<PROJECT_NAME>"
+  },
+  "paths": {
+    "rules": "AGENTS.md",
+    "sop": "docs/DEVELOPMENT_SOP.md",
+    "project_state": "docs/PROJECT_STATE.md"
+  },
+  "required_context": [
+    "AGENTS.md",
+    "docs/DEVELOPMENT_SOP.md"
+  ],
+  "work": {
+    "mode": "read_only"
+  },
+  "authorization": {
+    "modify": "separate",
+    "check": "separate",
+    "build": "separate",
+    "test": "separate",
+    "documentation_sync": "separate",
+    "commit": "separate",
+    "push": "separate"
+  },
+  "task_policy": {
+    "max_active_tasks": 1,
+    "max_active_tasks_applies_to": "subsequent_user_visible_execution_tasks",
+    "project_hub_task_lifecycle": "persistent",
+    "project_hub_occupies_active_task_slot": false,
+    "blocked_or_waiting_occupies_slot": true,
+    "return_to_work_on_change": [
+      "scope",
+      "interface",
+      "environment",
+      "acceptance_criteria"
+    ]
+  },
+  "execution_policy": {
+    "high_risk_operations": "serial",
+    "external_operations": "serial"
+  },
+  "handoff_policy": {
+    "only_when": [
+      "coordination_required",
+      "user_choice_required",
+      "user_requested"
+    ]
+  }
+}

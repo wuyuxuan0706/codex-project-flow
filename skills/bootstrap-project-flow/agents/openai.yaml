@@ -1,4 +1,4 @@
 interface:
   display_name: "Bootstrap Project Flow"
-  short_description: "Create, recover, reopen, and pin a permanent project hub"
-  default_prompt: "Use $bootstrap-project-flow directly in this saved local project to create, recover, reopen, and pin its permanent hub."
+  short_description: "Claim this task as the permanent project hub"
+  default_prompt: "Use $bootstrap-project-flow in this saved local project to install the workflow and claim this task as its permanent hub; create a separate hub only if I explicitly ask."
