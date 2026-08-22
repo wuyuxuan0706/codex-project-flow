@@ -32,6 +32,12 @@
 
 插件安装或文件复制本身没有“安装完成后自动执行”的零点击钩子。应显式调用一次 `$bootstrap-project-flow`，不要把打开仓库、复制目录或安装插件本体误认为已经创建了项目中枢任务。
 
+### 首次安装 Plugin
+
+克隆仓库只获得源码，不会自动把 Plugin 注册到 Codex。每台设备首次使用时，需要把稳定的仓库检出登记到默认个人 Marketplace，并安装一次 `codex-project-flow@personal`。推荐在 Codex 中让 `$plugin-creator` 完成登记和安装；个人 Marketplace 的插件源码入口应为 `~/plugins/codex-project-flow`，可将它链接到长期维护的仓库检出，避免维护两份源码。
+
+安装成功后新建一个任务，使 Codex 重新加载 `$bootstrap-project-flow` 和 `$upgrade-project-flow`。Plugin 是设备级能力，不需要为每个项目重复安装；每个新项目仍需调用一次 bootstrap，已部署项目则在 Plugin 更新后按需调用 upgrade。开发中的 Plugin 源码发生变化时，应使用 `$plugin-creator` 的 cachebuster 与重新安装流程刷新 Codex 缓存，而不是手工修改 Marketplace 清单。
+
 ## 仅安装项目文件
 
 如只需把模板文件安装到项目，可手动运行安装器。

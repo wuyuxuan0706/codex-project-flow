@@ -1,6 +1,6 @@
 {
   "name": "codex-project-flow",
-  "version": "0.3.0",
+  "version": "0.3.0+codex.20260822090049",
   "description": "Install and safely upgrade a reusable Codex workflow with one permanent project hub and bounded execution-task generations.",
   "author": {
     "name": "codex-project-flow contributors"
