@@ -64,7 +64,20 @@ if [ "$allow_placeholders" -eq 1 ]; then
     require_file ".codex-plugin/plugin.json"
     require_file "managed-files.json"
     require_file "migrations/0.2.0-to-0.3.0.json"
+    require_file "migrations/0.2.0-to-0.3.1.json"
+    require_file "migrations/0.3.0-to-0.3.1.json"
     require_file "baselines/0.2.0/AGENTS.md"
+    require_file "baselines/0.3.0/AGENTS.md"
+    require_file "baselines/0.3.0/.agents/workflow.json"
+    require_file "baselines/0.3.0/.agents/prompts/00_project_hub.md"
+    require_file "baselines/0.3.0/.agents/prompts/08_result_handoff.md"
+    require_file "baselines/0.3.0/.agents/prompts/09_execution_handoff.md"
+    require_file "baselines/0.3.0/.agents/skills/project-workflow-manager/SKILL.md"
+    require_file "baselines/0.3.0/.agents/skills/project-workflow-manager/agents/openai.yaml"
+    require_file "baselines/0.3.0/.agents/snippets/AGENTS.integration.md"
+    require_file "baselines/0.3.0/docs/DEVELOPMENT_SOP.md"
+    require_file "baselines/0.3.0/docs/PROJECT_STATE.md"
+    require_file "baselines/0.3.0/docs/WORKFLOW_GUIDE.md"
     require_file "scripts/upgrade.sh"
     require_file "scripts/upgrade.ps1"
     require_file "skills/bootstrap-project-flow/SKILL.md"
@@ -144,9 +157,10 @@ install_manifest="$target_root/.project-flow/manifest.json"
 if [ -e "$install_manifest" ] && [ ! -f "$install_manifest" ]; then
     error ".project-flow/manifest.json exists and is not a regular file."
 elif [ -f "$install_manifest" ]; then
-    if ! command -v python3 >/dev/null 2>&1; then
-        error "python3 is required to validate .project-flow/manifest.json."
-    elif ! python3 - "$install_manifest" "$target_root/.agents/workflow.json" <<'PY'
+    python_cmd=${PYTHON:-python3}
+    if ! command -v "$python_cmd" >/dev/null 2>&1; then
+        error "$python_cmd is required to validate .project-flow/manifest.json."
+    elif ! "$python_cmd" - "$install_manifest" "$target_root/.agents/workflow.json" <<'PY'
 import json
 from pathlib import Path, PurePosixPath
 import re
@@ -176,7 +190,7 @@ try:
     manifest = load(sys.argv[1])
     workflow = load(sys.argv[2])
     assert isinstance(manifest, dict) and manifest.get("schema_version") == 1
-    assert manifest.get("workflow_version") == "0.3.0"
+    assert manifest.get("workflow_version") == "0.3.1"
     name = manifest.get("project_name")
     assert isinstance(name, str) and name.strip() and not any(ord(ch) < 32 or ord(ch) == 127 for ch in name)
     assert workflow.get("project", {}).get("name") == name
@@ -201,7 +215,7 @@ except Exception as exc:
     raise SystemExit(1)
 PY
     then
-        error ".project-flow/manifest.json does not satisfy the 0.3.0 install contract."
+        error ".project-flow/manifest.json does not satisfy the 0.3.1 install contract."
     fi
 fi
 
@@ -420,6 +434,14 @@ if [ -f "$config" ]; then
                     print ((string_value == "read_only") ? "WORK_MODE:ok" : "WORK_MODE:other")
                 } else if (context == "/task_policy/max_active_tasks_applies_to") {
                     print ((string_value == "subsequent_user_visible_execution_tasks") ? "MAX_ACTIVE_TASKS_APPLIES_TO:ok" : "MAX_ACTIVE_TASKS_APPLIES_TO:other")
+                } else if (context == "/task_policy/execution_task_requirement") {
+                    print ((string_value == "user_visible_active_task_required") ? "EXECUTION_TASK_REQUIREMENT:ok" : "EXECUTION_TASK_REQUIREMENT:other")
+                } else if (context == "/task_policy/selected_item_authorization") {
+                    print ((string_value == "authorize_creation_of_corresponding_execution_task") ? "SELECTED_ITEM_AUTHORIZATION:ok" : "SELECTED_ITEM_AUTHORIZATION:other")
+                } else if (context == "/task_policy/task_management_failure") {
+                    print ((string_value == "stop_and_report_no_hub_fallback") ? "TASK_MANAGEMENT_FAILURE:ok" : "TASK_MANAGEMENT_FAILURE:other")
+                } else if (context == "/task_policy/hidden_subagents") {
+                    print ((string_value == "must_not_substitute_user_visible_execution_tasks") ? "HIDDEN_SUBAGENTS:ok" : "HIDDEN_SUBAGENTS:other")
                 } else if (context == "/task_policy/project_hub_task_lifecycle") {
                     print ((string_value == "persistent") ? "PROJECT_HUB_TASK_LIFECYCLE:ok" : "PROJECT_HUB_TASK_LIFECYCLE:other")
                 } else if (context == "/authorization/modify") {
@@ -466,6 +488,12 @@ if [ -f "$config" ]; then
                     print ((string_value == "serial") ? "EXECUTION:high_risk_operations:ok" : "EXECUTION:high_risk_operations:other")
                 } else if (context == "/execution_policy/external_operations") {
                     print ((string_value == "serial") ? "EXECUTION:external_operations:ok" : "EXECUTION:external_operations:other")
+                } else if (context == "/execution_policy/project_hub_role") {
+                    print ((string_value == "analyze_clarify_design_number_create_wait_coordinate_and_summarize_only") ? "EXECUTION:project_hub_role:ok" : "EXECUTION:project_hub_role:other")
+                } else if (context == "/execution_policy/project_hub_execution_fallback") {
+                    print ((string_value == "forbidden") ? "EXECUTION:project_hub_execution_fallback:ok" : "EXECUTION:project_hub_execution_fallback:other")
+                } else if (context == "/execution_policy/non_conflicting_operations") {
+                    print ((string_value == "parallel_allowed") ? "EXECUTION:non_conflicting_operations:ok" : "EXECUTION:non_conflicting_operations:other")
                 } else if (context == "/task_policy/return_to_work_on_change/item") {
                     if (string_value ~ /[\r\n]/) print "RETURN_INVALID"
                     else print "RETURN_ITEM:" string_value
@@ -483,7 +511,7 @@ if [ -f "$config" ]; then
                     print "SCHEMA:2"
                 } else if (context == "/schema_version") {
                     print "SCHEMA:other"
-                } else if (context == "/task_policy/max_active_tasks" && number_value + 0 == 1) {
+                } else if (context == "/task_policy/max_active_tasks" && number_value + 0 == 5) {
                     print "MAX_ACTIVE_TASKS:ok"
                 } else if (context == "/task_policy/max_active_tasks") {
                     print "MAX_ACTIVE_TASKS:other"
@@ -500,7 +528,7 @@ if [ -f "$config" ]; then
             }
             literal = substr(text, pos, 4)
             if (literal == "true") {
-                if (context == "/task_policy/blocked_or_waiting_occupies_slot") {
+                if (context == "/task_policy/blocked_waiting_or_queued_occupies_slot") {
                     print "BLOCKED_WAITING:ok"
                 } else if (context == "/task_policy/project_hub_occupies_active_task_slot") {
                     print "PROJECT_HUB_OCCUPIES_ACTIVE_TASK_SLOT:other"
@@ -513,7 +541,7 @@ if [ -f "$config" ]; then
                 return 1
             }
             if (substr(text, pos, 5) == "false") {
-                if (context == "/task_policy/blocked_or_waiting_occupies_slot") {
+                if (context == "/task_policy/blocked_waiting_or_queued_occupies_slot") {
                     print "BLOCKED_WAITING:other"
                 } else if (context == "/task_policy/project_hub_occupies_active_task_slot") {
                     print "PROJECT_HUB_OCCUPIES_ACTIVE_TASK_SLOT:ok"
@@ -601,8 +629,11 @@ if [ "$json_valid" -eq 1 ]; then
     for field in modify check build test documentation_sync commit push task_rotation; do
         meta_has "AUTH:$field:ok" || error "authorization.$field must be separate."
     done
-    meta_has 'MAX_ACTIVE_TASKS:ok' || error "task_policy.max_active_tasks must be the number 1."
-    meta_has 'BLOCKED_WAITING:ok' || error "task_policy.blocked_or_waiting_occupies_slot must be true."
+    meta_has 'MAX_ACTIVE_TASKS:ok' || error "task_policy.max_active_tasks must be the number 5."
+    meta_has 'BLOCKED_WAITING:ok' || error "task_policy.blocked_waiting_or_queued_occupies_slot must be true."
+    for marker in EXECUTION_TASK_REQUIREMENT SELECTED_ITEM_AUTHORIZATION TASK_MANAGEMENT_FAILURE HIDDEN_SUBAGENTS; do
+        meta_has "$marker:ok" || error "task_policy has an unsupported or missing fail-closed value: $marker"
+    done
     meta_has 'MAX_ACTIVE_TASKS_APPLIES_TO:ok' ||
         error "task_policy.max_active_tasks_applies_to must be subsequent_user_visible_execution_tasks."
     meta_has 'PROJECT_HUB_TASK_LIFECYCLE:ok' ||
@@ -651,8 +682,8 @@ if [ "$json_valid" -eq 1 ]; then
         [ "$rotation_state" = "$expected_rotation_state" ] ||
             error "task_policy.rotation.state_machine must contain the exact ordered five-state sequence without duplicates."
     fi
-    for field in high_risk_operations external_operations; do
-        meta_has "EXECUTION:$field:ok" || error "execution_policy.$field must be serial."
+    for field in project_hub_role project_hub_execution_fallback non_conflicting_operations high_risk_operations external_operations; do
+        meta_has "EXECUTION:$field:ok" || error "execution_policy.$field has an unsupported or missing value."
     done
     if ! meta_has 'HANDOFF_ARRAY'; then
         error "handoff_policy.only_when must be a JSON array."

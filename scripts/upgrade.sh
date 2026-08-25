@@ -4,12 +4,13 @@ set -eu
 script_root=$(CDPATH= cd -P "$(dirname "$0")" && pwd -P)
 plugin_root=$(CDPATH= cd -P "$script_root/.." && pwd -P)
 
-command -v python3 >/dev/null 2>&1 || {
-    echo "python3 is required by upgrade.sh" >&2
+python_cmd=${PYTHON:-python3}
+command -v "$python_cmd" >/dev/null 2>&1 || {
+    echo "$python_cmd is required by upgrade.sh" >&2
     exit 3
 }
 
-exec python3 - "$plugin_root" "$@" <<'PY'
+exec "$python_cmd" - "$plugin_root" "$@" <<'PY'
 import argparse
 import datetime
 import hashlib
@@ -353,17 +354,25 @@ project_name = infer_project_name()
 installed_version = args.adopt_from if manifest is None else manifest.get("workflow_version")
 if not isinstance(installed_version, str) or not installed_version:
     fail("Manifest workflow_version is missing")
-if installed_version not in ("0.2.0", new_version):
-    fail("No supported migration from " + installed_version + " to " + new_version)
 
 introduced = set()
-if installed_version == "0.2.0" and installed_version != new_version:
+if installed_version != new_version:
+    migration_relative = "migrations/" + installed_version + "-to-" + new_version + ".json"
     migration_path = plugin_input(
-        "migrations/" + installed_version + "-to-" + new_version + ".json",
+        migration_relative,
         "migration descriptor",
+        allow_missing_tail=True,
     )
+    if not migration_path.is_file():
+        fail("No supported migration from " + installed_version + " to " + new_version)
     migration = load_json(migration_path, "migration descriptor")
-    if migration.get("from_version") != installed_version or migration.get("to_version") != new_version:
+    if (
+        migration.get("schema_version") != 1 or
+        migration.get("from_version") != installed_version or
+        migration.get("to_version") != new_version or
+        migration.get("baseline_root") != "baselines/" + installed_version or
+        migration.get("managed_files") != "managed-files.json"
+    ):
         fail("Migration descriptor does not match requested versions")
     introduced_raw = migration.get("introduced_files", [])
     if not isinstance(introduced_raw, list):

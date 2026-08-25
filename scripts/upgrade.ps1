@@ -163,7 +163,7 @@ function Write-AtomicBytes([string]$Path, [byte[]]$Bytes) {
     try {
         [System.IO.File]::WriteAllBytes($temporary, $Bytes)
         if ($existing) {
-            [System.IO.File]::Replace($temporary, $Path, $null)
+            [System.IO.File]::Move($temporary, $Path, $true)
         } else {
             [System.IO.File]::Move($temporary, $Path)
         }
@@ -178,7 +178,11 @@ function Write-AtomicText([string]$Path, [string]$Text) {
 
 function Read-JsonFile([string]$Path, [string]$Label) {
     try {
-        return (Read-NormalizedText $Path $Label) | ConvertFrom-Json
+        $text = Read-NormalizedText $Path $Label
+        if ($text -notmatch '^\s*\{') { throw "JSON root must be an object" }
+        $parsed = $text | ConvertFrom-Json
+        if ($parsed -isnot [pscustomobject]) { throw "JSON root must be an object" }
+        return $parsed
     } catch {
         throw "$Label is invalid JSON: $($_.Exception.Message)"
     }
@@ -297,7 +301,7 @@ function Invoke-TransactionRollback([string]$Identifier, [bool]$Automatic = $fal
     } elseif ($manifestCurrent -eq $meta.old_manifest_hash) {
         $manifestDecision = "unchanged"
     } else {
-        throw "Refusing rollback because the manifest changed after apply."
+        throw "Refusing rollback because the manifest changed after apply (transaction=$Identifier manifest=$manifestPath current=$manifestCurrent expected=$($meta.new_manifest_hash))."
     }
 
     foreach ($decision in $decisions) {
@@ -360,15 +364,25 @@ if ($ProjectName) {
 
 $installedVersion = if ($null -eq $manifest) { $AdoptFrom } else { [string]$manifest.workflow_version }
 if ([string]::IsNullOrWhiteSpace($installedVersion)) { throw "Manifest workflow_version is missing." }
-if (@("0.2.0", $newVersion) -notcontains $installedVersion) {
-    throw "No supported migration from $installedVersion to $newVersion"
-}
 $introduced = @{}
-if ($installedVersion -eq "0.2.0" -and $installedVersion -ne $newVersion) {
-    $migrationPath = Resolve-SafePluginInput "migrations/0.2.0-to-$newVersion.json" "migration descriptor"
+if ($installedVersion -ne $newVersion) {
+    $migrationRelative = "migrations/$installedVersion-to-$newVersion.json"
+    $migrationPath = Resolve-SafePluginInput $migrationRelative "migration descriptor" -AllowMissingTail
+    if (-not (Test-Path -LiteralPath $migrationPath -PathType Leaf)) {
+        throw "No supported migration from $installedVersion to $newVersion"
+    }
     $migration = Read-JsonFile $migrationPath "migration descriptor"
-    if ($migration.from_version -ne $installedVersion -or $migration.to_version -ne $newVersion) {
+    if (
+        $migration.schema_version -ne 1 -or
+        $migration.from_version -ne $installedVersion -or
+        $migration.to_version -ne $newVersion -or
+        $migration.baseline_root -ne "baselines/$installedVersion" -or
+        $migration.managed_files -ne "managed-files.json"
+    ) {
         throw "Migration descriptor does not match requested versions."
+    }
+    if ($migration.introduced_files -isnot [System.Array]) {
+        throw "Migration introduced_files must be an array."
     }
     foreach ($introducedPath in @($migration.introduced_files)) {
         $introducedPath = [string]$introducedPath
@@ -539,12 +553,12 @@ $newManifest = [ordered]@{
     schema_version = 1; workflow_version = $newVersion; project_name = $resolvedProjectName
     installed_at_utc = $now; last_transaction = $identifier; files = $manifestFiles
 }
-$newManifestText = ($newManifest | ConvertTo-Json -Depth 20) + "`n"
+$newManifestText = (($newManifest | ConvertTo-Json -Depth 20) + "`n").Replace("`r`n", "`n").Replace("`r", "`n")
 $meta = [ordered]@{
     schema_version = 1; transaction_id = $identifier; target = $targetRoot
     from_version = $installedVersion; to_version = $newVersion; state = "prepared"; created_at_utc = $now
     old_manifest_hash = $oldManifestHash; new_manifest_hash = (Get-TextHash $newManifestText)
-    accepted_local = @($acceptedLocalPaths.Keys | Sort-Object); files = @($records)
+    accepted_local = @($acceptedLocalPaths.Keys | Sort-Object); files = $records.ToArray()
 }
 $metaPath = Join-Path $transactionRoot "transaction.json"
 Write-AtomicText $metaPath (($meta | ConvertTo-Json -Depth 20) + "`n")
@@ -552,6 +566,10 @@ Write-AtomicText $metaPath (($meta | ConvertTo-Json -Depth 20) + "`n")
 try {
     foreach ($item in $changes) { Write-AtomicText (Resolve-SafePath $item.Path) $item.NewText }
     Write-AtomicText $manifestPath $newManifestText
+    $writtenManifestHash = Get-FileHashNormalized $manifestPath $manifestRelative
+    if ($writtenManifestHash -ne $meta.new_manifest_hash) {
+        throw "Written manifest hash mismatch (current=$writtenManifestHash expected=$($meta.new_manifest_hash))."
+    }
     $meta["state"] = "validating"
     Write-AtomicText $metaPath (($meta | ConvertTo-Json -Depth 20) + "`n")
     & (Join-Path $pluginRoot "scripts/validate.ps1") -Target $targetRoot
@@ -560,8 +578,13 @@ try {
     $meta["validated_at_utc"] = (Get-Date).ToUniversalTime().ToString("o")
     Write-AtomicText $metaPath (($meta | ConvertTo-Json -Depth 20) + "`n")
 } catch {
-    Write-Error "Apply failed; attempting automatic rollback: $($_.Exception.Message)" -ErrorAction Continue
-    Invoke-TransactionRollback $identifier $true
+    $applyError = $_.Exception.Message
+    Write-Error "Apply failed; attempting automatic rollback: $applyError" -ErrorAction Continue
+    try {
+        Invoke-TransactionRollback $identifier $true
+    } catch {
+        throw "Apply failed ($applyError) and automatic rollback also failed: $($_.Exception.Message)"
+    }
     exit 5
 }
 

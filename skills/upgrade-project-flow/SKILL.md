@@ -20,4 +20,6 @@ Resolve `pluginRoot` as `../..` from this skill directory, then use the platform
 
 Read [references/upgrade-contract.md](references/upgrade-contract.md) before applying, adopting, resolving conflicts, or rolling back. Never replace `docs/PROJECT_STATE.md`, bypass a conflict with force, edit the target manifest manually, or claim success unless the script and post-upgrade validator succeed.
 
+A manifest-backed `0.3.0` project upgrades directly through the immutable `0.3.0` baseline and the `0.3.0-to-0.3.1` descriptor. Only a confirmed legacy project without a manifest uses the explicit `0.2.0` adoption flag; migrations are single-hop and are never chained implicitly.
+
 Report the target, source and destination versions, mode, per-file plan summary, conflict staging path if any, transaction ID if created, validation result, and whether rollback occurred.

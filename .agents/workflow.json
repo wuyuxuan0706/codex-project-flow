@@ -27,11 +27,15 @@
     "task_rotation": "separate"
   },
   "task_policy": {
-    "max_active_tasks": 1,
+    "max_active_tasks": 5,
     "max_active_tasks_applies_to": "subsequent_user_visible_execution_tasks",
     "project_hub_task_lifecycle": "persistent",
     "project_hub_occupies_active_task_slot": false,
-    "blocked_or_waiting_occupies_slot": true,
+    "blocked_waiting_or_queued_occupies_slot": true,
+    "execution_task_requirement": "user_visible_active_task_required",
+    "selected_item_authorization": "authorize_creation_of_corresponding_execution_task",
+    "task_management_failure": "stop_and_report_no_hub_fallback",
+    "hidden_subagents": "must_not_substitute_user_visible_execution_tasks",
     "rotation": {
       "primary_trigger": "milestone_boundary_or_complete_modify_verify_cycle",
       "review_after_substantive_turns": 6,
@@ -66,6 +70,9 @@
     ]
   },
   "execution_policy": {
+    "project_hub_role": "analyze_clarify_design_number_create_wait_coordinate_and_summarize_only",
+    "project_hub_execution_fallback": "forbidden",
+    "non_conflicting_operations": "parallel_allowed",
     "high_risk_operations": "serial",
     "external_operations": "serial"
   },

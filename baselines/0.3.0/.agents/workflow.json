@@ -1,0 +1,79 @@
+{
+  "schema_version": 2,
+  "project": {
+    "name": "<PROJECT_NAME>"
+  },
+  "paths": {
+    "rules": "AGENTS.md",
+    "sop": "docs/DEVELOPMENT_SOP.md",
+    "project_state": "docs/PROJECT_STATE.md",
+    "execution_handoff": ".agents/prompts/09_execution_handoff.md"
+  },
+  "required_context": [
+    "AGENTS.md",
+    "docs/DEVELOPMENT_SOP.md"
+  ],
+  "work": {
+    "mode": "read_only"
+  },
+  "authorization": {
+    "modify": "separate",
+    "check": "separate",
+    "build": "separate",
+    "test": "separate",
+    "documentation_sync": "separate",
+    "commit": "separate",
+    "push": "separate",
+    "task_rotation": "separate"
+  },
+  "task_policy": {
+    "max_active_tasks": 1,
+    "max_active_tasks_applies_to": "subsequent_user_visible_execution_tasks",
+    "project_hub_task_lifecycle": "persistent",
+    "project_hub_occupies_active_task_slot": false,
+    "blocked_or_waiting_occupies_slot": true,
+    "rotation": {
+      "primary_trigger": "milestone_boundary_or_complete_modify_verify_cycle",
+      "review_after_substantive_turns": 6,
+      "rotate_no_later_than_substantive_turns": 10,
+      "additional_triggers": [
+        "context_pressure",
+        "user_request"
+      ],
+      "authorization_scope": "same_already_authorized_scope_only",
+      "change_behavior": "return_to_work",
+      "state_machine": [
+        "prepare_handoff_package",
+        "project_hub_acknowledges_complete_handoff",
+        "archive_predecessor",
+        "create_successor",
+        "successor_rechecks_rules_and_workspace"
+      ],
+      "create_failure_without_id": "restore_predecessor",
+      "queued_client_thread_id": "occupies_active_task_slot_and_do_not_retry",
+      "successor_identity": "exact_rotation_key_v1_in_first_user_message",
+      "queued_recovery": "exhaustive_same_project_discovery_and_exact_rotation_key_match",
+      "rotation_key_format": "[codex-project-flow:execution:v1] projectId=<exactProjectId>; hubThreadId=<exactHubThreadId>; predecessorThreadId=<exactPredecessorThreadId>; generation=<positiveInteger>",
+      "independent_worktree_requirement": "authorized_transferable_code_checkpoint"
+    },
+    "return_to_work_on_change": [
+      "requirements",
+      "scope",
+      "interface",
+      "protocol",
+      "environment",
+      "acceptance_criteria"
+    ]
+  },
+  "execution_policy": {
+    "high_risk_operations": "serial",
+    "external_operations": "serial"
+  },
+  "handoff_policy": {
+    "only_when": [
+      "coordination_required",
+      "user_choice_required",
+      "user_requested"
+    ]
+  }
+}

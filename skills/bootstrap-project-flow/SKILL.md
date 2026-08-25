@@ -5,7 +5,7 @@ description: Install codex-project-flow templates into a saved local project and
 
 # Bootstrap Project Flow
 
-Install the workflow templates, then establish exactly one permanent project hub. By default, claim the task that invoked this skill as the hub. Create a separate user-visible hub task only when the user explicitly requests a separate hub. Reopen and pin the selected hub so it remains the lasting coordination entry point; it does not consume the separate limit of at most one active, user-visible execution task.
+Install the workflow templates, then establish exactly one permanent project hub. By default, claim the task that invoked this skill as the hub. Create a separate user-visible hub task only when the user explicitly requests a separate hub. Reopen and pin the selected hub so it remains the lasting coordination entry point; it does not consume the separate limit of at most five active, user-visible execution tasks.
 
 ## Identity, modes, and safety
 
@@ -111,7 +111,7 @@ Install the workflow templates, then establish exactly one permanent project hub
      [codex-project-flow:hub:v1] projectId=<exactProjectId>; hubTitle=<hubTitle>
      当前任务已是“<projectName>”项目的永久项目中枢，不再调用 $bootstrap-project-flow，也不再创建、派生或转交到另一个项目中枢。
      请读取项目根目录中的 AGENTS.md 和 .agents/prompts/00_project_hub.md，并严格按该中枢运行态工作。先只读了解项目、目标、边界和现状；在用户明确选择编号执行项之前，不修改文件、不运行检查或测试、不提交、不推送、不执行外部操作。
-     本中枢永久保留并固定在 Codex 侧边栏，且不计入执行任务名额；中枢之外，同一时间最多协调一个用户可见的活动执行任务。
+     本中枢永久保留并固定在 Codex 侧边栏，且不计入执行任务名额；中枢之外，同一时间最多协调五个用户可见活动执行任务。每个执行编号项都必须创建对应的用户可见活动任务；任务管理不可用、创建或身份确认失败时停止并报告，禁止回退到中枢执行，也不得用隐藏子代理替代。
      ~~~
 
    - When `create_thread` returns a real `threadId`, use only that ID to call `set_thread_archived` with `archived: false`, then `set_thread_title` with `hubTitle`, then `set_thread_pinned` with `pinned: true`. Report ready only after all three calls confirm success.

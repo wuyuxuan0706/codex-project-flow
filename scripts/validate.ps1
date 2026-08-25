@@ -43,7 +43,7 @@ function Resolve-InTarget([string]$RelativePath) {
     return $full
 }
 
-function Test-JsonNumberEqualOne([object]$Value) {
+function Test-JsonNumberEqualFive([object]$Value) {
     $isNumber = (
         $Value -is [byte] -or $Value -is [sbyte] -or
         $Value -is [int16] -or $Value -is [uint16] -or
@@ -52,7 +52,7 @@ function Test-JsonNumberEqualOne([object]$Value) {
         $Value -is [single] -or $Value -is [double] -or
         $Value -is [decimal]
     )
-    return $isNumber -and ([decimal]$Value -eq 1)
+    return $isNumber -and ([decimal]$Value -eq 5)
 }
 
 $requiredFiles = @(
@@ -76,7 +76,20 @@ if ($AllowPlaceholders) {
         ".codex-plugin/plugin.json",
         "managed-files.json",
         "migrations/0.2.0-to-0.3.0.json",
+        "migrations/0.2.0-to-0.3.1.json",
+        "migrations/0.3.0-to-0.3.1.json",
         "baselines/0.2.0/AGENTS.md",
+        "baselines/0.3.0/AGENTS.md",
+        "baselines/0.3.0/.agents/workflow.json",
+        "baselines/0.3.0/.agents/prompts/00_project_hub.md",
+        "baselines/0.3.0/.agents/prompts/08_result_handoff.md",
+        "baselines/0.3.0/.agents/prompts/09_execution_handoff.md",
+        "baselines/0.3.0/.agents/skills/project-workflow-manager/SKILL.md",
+        "baselines/0.3.0/.agents/skills/project-workflow-manager/agents/openai.yaml",
+        "baselines/0.3.0/.agents/snippets/AGENTS.integration.md",
+        "baselines/0.3.0/docs/DEVELOPMENT_SOP.md",
+        "baselines/0.3.0/docs/PROJECT_STATE.md",
+        "baselines/0.3.0/docs/WORKFLOW_GUIDE.md",
         "scripts/upgrade.sh",
         "scripts/upgrade.ps1",
         "skills/bootstrap-project-flow/SKILL.md",
@@ -182,7 +195,10 @@ if (Test-Path -LiteralPath $installManifestPath) {
         Add-Error ".project-flow/manifest.json exists and is not a regular file."
     } else {
         try {
-            $installManifest = Get-Content -Raw -Encoding UTF8 -LiteralPath $installManifestPath | ConvertFrom-Json
+            $installManifestText = Get-Content -Raw -Encoding UTF8 -LiteralPath $installManifestPath
+            if ($installManifestText -notmatch '^\s*\{') { throw "JSON root must be an object" }
+            $installManifest = $installManifestText | ConvertFrom-Json
+            if ($installManifest -isnot [pscustomobject]) { throw "JSON root must be an object" }
             $expectedManifestFiles = [ordered]@{
                 "AGENTS.md" = @("AGENTS.md", "merge_manual")
                 ".agents/workflow.json" = @(".agents/workflow.json", "structured_manual")
@@ -196,7 +212,7 @@ if (Test-Path -LiteralPath $installManifestPath) {
                 "docs/PROJECT_STATE.md" = @("templates/PROJECT_STATE.md", "seed_once")
                 "docs/WORKFLOW_GUIDE.md" = @("docs/WORKFLOW_GUIDE.md", "replace_if_unmodified")
             }
-            if ($installManifest.schema_version -ne 1 -or [string]$installManifest.workflow_version -cne "0.3.0") {
+            if ($installManifest.schema_version -ne 1 -or [string]$installManifest.workflow_version -cne "0.3.1") {
                 throw "unsupported schema or workflow version"
             }
             $manifestProjectName = [string]$installManifest.project_name
@@ -238,7 +254,7 @@ if (Test-Path -LiteralPath $installManifestPath) {
                 }
             }
         } catch {
-            Add-Error ".project-flow/manifest.json does not satisfy the 0.3.0 install contract: $($_.Exception.Message)"
+            Add-Error ".project-flow/manifest.json does not satisfy the 0.3.1 install contract: $($_.Exception.Message)"
         }
     }
 }
@@ -250,7 +266,12 @@ $configParsed = $false
 $configIsObject = $false
 if (Test-Path -LiteralPath $configPath -PathType Leaf) {
     try {
-        $parsedConfig = Get-Content -Raw -Encoding UTF8 -LiteralPath $configPath | ConvertFrom-Json
+        $configText = Get-Content -Raw -Encoding UTF8 -LiteralPath $configPath
+        if ($configText -notmatch '^\s*\{') {
+            Add-Error "The JSON root in $configRelative must be an object."
+            throw "JSON root is not an object"
+        }
+        $parsedConfig = $configText | ConvertFrom-Json
         $configParsed = $true
         if (
             $null -ne $parsedConfig -and
@@ -262,7 +283,9 @@ if (Test-Path -LiteralPath $configPath -PathType Leaf) {
             Add-Error "The JSON root in $configRelative must be an object."
         }
     } catch {
-        Add-Error "Invalid JSON in ${configRelative}: $($_.Exception.Message)"
+        if ($configText -match '^\s*\{') {
+            Add-Error "Invalid JSON in ${configRelative}: $($_.Exception.Message)"
+        }
     }
 }
 
@@ -351,14 +374,26 @@ if ($configParsed -and $configIsObject) {
     if (-not $taskPolicyProperty -or $config.task_policy -isnot [pscustomobject]) {
         Add-Error "task_policy must be a JSON object."
     } else {
-        if (-not (Test-JsonNumberEqualOne $config.task_policy.max_active_tasks)) {
-            Add-Error "task_policy.max_active_tasks must be the number 1."
+        if (-not (Test-JsonNumberEqualFive $config.task_policy.max_active_tasks)) {
+            Add-Error "task_policy.max_active_tasks must be the number 5."
         }
         if (
-            $config.task_policy.blocked_or_waiting_occupies_slot -isnot [bool] -or
-            -not $config.task_policy.blocked_or_waiting_occupies_slot
+            $config.task_policy.blocked_waiting_or_queued_occupies_slot -isnot [bool] -or
+            -not $config.task_policy.blocked_waiting_or_queued_occupies_slot
         ) {
-            Add-Error "task_policy.blocked_or_waiting_occupies_slot must be true."
+            Add-Error "task_policy.blocked_waiting_or_queued_occupies_slot must be true."
+        }
+        $expectedTaskPolicyStrings = @{
+            execution_task_requirement = "user_visible_active_task_required"
+            selected_item_authorization = "authorize_creation_of_corresponding_execution_task"
+            task_management_failure = "stop_and_report_no_hub_fallback"
+            hidden_subagents = "must_not_substitute_user_visible_execution_tasks"
+        }
+        foreach ($entry in $expectedTaskPolicyStrings.GetEnumerator()) {
+            $property = $config.task_policy.PSObject.Properties[$entry.Key]
+            if (-not $property -or $property.Value -isnot [string] -or $property.Value -cne $entry.Value) {
+                Add-Error "task_policy.$($entry.Key) must be $($entry.Value)."
+            }
         }
         if (
             $config.task_policy.max_active_tasks_applies_to -isnot [string] -or
@@ -456,13 +491,20 @@ if ($configParsed -and $configIsObject) {
     if (-not $executionPolicyProperty -or $config.execution_policy -isnot [pscustomobject]) {
         Add-Error "execution_policy must be a JSON object."
     } else {
-        foreach ($field in @("high_risk_operations", "external_operations")) {
-            $fieldProperty = $config.execution_policy.PSObject.Properties[$field]
+        $expectedExecutionPolicyStrings = @{
+            project_hub_role = "analyze_clarify_design_number_create_wait_coordinate_and_summarize_only"
+            project_hub_execution_fallback = "forbidden"
+            non_conflicting_operations = "parallel_allowed"
+            high_risk_operations = "serial"
+            external_operations = "serial"
+        }
+        foreach ($entry in $expectedExecutionPolicyStrings.GetEnumerator()) {
+            $fieldProperty = $config.execution_policy.PSObject.Properties[$entry.Key]
             if (
                 -not $fieldProperty -or $fieldProperty.Value -isnot [string] -or
-                $fieldProperty.Value -cne "serial"
+                $fieldProperty.Value -cne $entry.Value
             ) {
-                Add-Error "execution_policy.$field must be serial."
+                Add-Error "execution_policy.$($entry.Key) must be $($entry.Value)."
             }
         }
     }
@@ -501,7 +543,9 @@ if ($AllowPlaceholders) {
             Add-Error "VERSION must contain a strict semantic version."
         }
         try {
-            $plugin = Get-Content -Raw -Encoding UTF8 -LiteralPath $pluginPath | ConvertFrom-Json
+            $pluginText = Get-Content -Raw -Encoding UTF8 -LiteralPath $pluginPath
+            if ($pluginText -notmatch '^\s*\{') { throw "JSON root must be an object" }
+            $plugin = $pluginText | ConvertFrom-Json
             if (
                 $null -eq $plugin -or
                 $plugin.GetType().FullName -ne "System.Management.Automation.PSCustomObject"

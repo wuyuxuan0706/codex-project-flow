@@ -7,6 +7,7 @@ $testRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("codex-project-flow-" +
 $emptyTarget = Join-Path $testRoot "empty-project"
 $existingTarget = Join-Path $testRoot "existing-project"
 $legacyTarget = Join-Path $testRoot "legacy-project"
+$versionedTarget = Join-Path $testRoot "versioned-project"
 $upgradeTarget = Join-Path $testRoot "upgrade-project"
 $conflictTarget = Join-Path $testRoot "conflict-project"
 $noopInvalidTarget = Join-Path $testRoot "noop-invalid-project"
@@ -53,7 +54,7 @@ function Assert-ManifestContract([string]$Target, [string]$ProjectName) {
         throw "Manifest is missing: $manifestPath"
     }
     $manifest = Get-Content -Raw -Encoding UTF8 -LiteralPath $manifestPath | ConvertFrom-Json
-    if ($managed.workflow_version -cne "0.3.0" -or $manifest.schema_version -ne 1 -or
+    if ($managed.workflow_version -cne "0.3.1" -or $manifest.schema_version -ne 1 -or
         $manifest.workflow_version -cne $managed.workflow_version -or $manifest.project_name -cne $ProjectName) {
         throw "Manifest metadata is inconsistent with managed-files.json."
     }
@@ -111,6 +112,44 @@ function New-LegacyFixture([string]$Target, [string]$ProjectName) {
     }
 }
 
+function New-VersionedFixture([string]$Target, [string]$ProjectName) {
+    $baselineRoot = Join-Path $repoRoot "baselines/0.3.0"
+    $managed = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $repoRoot "managed-files.json") |
+        ConvertFrom-Json
+    $manifestFiles = New-Object System.Collections.Generic.List[object]
+    foreach ($entry in @($managed.files)) {
+        $relative = [string]$entry.path
+        $source = Join-Path $baselineRoot $relative
+        $destination = Join-Path $Target $relative
+        [System.IO.Directory]::CreateDirectory((Split-Path -Parent $destination)) | Out-Null
+        $text = Get-NormalizedText $source
+        if ([string]$entry.render -ceq "project_name_json") {
+            $replacement = ConvertTo-Json -InputObject $ProjectName -Compress
+            $text = $text.Replace('"<PROJECT_NAME>"', $replacement)
+        } else {
+            $text = $text.Replace("<PROJECT_NAME>", $ProjectName)
+        }
+        [System.IO.File]::WriteAllText($destination, $text, $utf8NoBom)
+        $manifestFiles.Add([ordered]@{
+            path = $relative
+            source = [string]$entry.source
+            policy = [string]$entry.policy
+            baseline_hash = Get-NormalizedTextHash $text
+        })
+    }
+    $manifest = [ordered]@{
+        schema_version = 1
+        workflow_version = "0.3.0"
+        project_name = $ProjectName
+        installed_at_utc = "2026-08-22T00:00:00Z"
+        last_transaction = $null
+        files = $manifestFiles.ToArray()
+    }
+    $manifestPath = Join-Path $Target ".project-flow/manifest.json"
+    [System.IO.Directory]::CreateDirectory((Split-Path -Parent $manifestPath)) | Out-Null
+    [System.IO.File]::WriteAllText($manifestPath, ($manifest | ConvertTo-Json -Depth 20) + "`n", $utf8NoBom)
+}
+
 function Get-DeployedDigest([string]$Root) {
     $items = Get-ChildItem -LiteralPath $Root -Recurse -File |
         Where-Object {
@@ -130,6 +169,7 @@ try {
     [System.IO.Directory]::CreateDirectory($emptyTarget) | Out-Null
     [System.IO.Directory]::CreateDirectory($existingTarget) | Out-Null
     [System.IO.Directory]::CreateDirectory($legacyTarget) | Out-Null
+    [System.IO.Directory]::CreateDirectory($versionedTarget) | Out-Null
     [System.IO.Directory]::CreateDirectory($upgradeTarget) | Out-Null
     [System.IO.Directory]::CreateDirectory($conflictTarget) | Out-Null
     [System.IO.Directory]::CreateDirectory($noopInvalidTarget) | Out-Null
@@ -149,6 +189,40 @@ try {
     foreach ($pluginFile in @($manifestPath, $bootstrapSkillPath, $bootstrapOpenAiPath)) {
         if (-not (Test-Path -LiteralPath $pluginFile -PathType Leaf)) {
             throw "Plugin packaging file is missing: $pluginFile"
+        }
+    }
+
+    $contractFiles = @(
+        "AGENTS.md",
+        ".agents/workflow.json",
+        ".agents/prompts/00_project_hub.md",
+        ".agents/snippets/AGENTS.integration.md",
+        "docs/DEVELOPMENT_SOP.md",
+        "docs/WORKFLOW_GUIDE.md",
+        "README.md",
+        "skills/bootstrap-project-flow/SKILL.md"
+    )
+    $contractText = @($contractFiles | ForEach-Object {
+        [System.IO.File]::ReadAllText((Join-Path $repoRoot $_))
+    }) -join "`n"
+    foreach ($forbiddenPattern in @(
+        '默认最多(?:保留|维护)?一个',
+        'at most one active',
+        '在当前(?:中枢任务|会话)继续'
+    )) {
+        if ($contractText -match $forbiddenPattern) {
+            throw "Workflow surfaces retain a conflicting hub rule: $forbiddenPattern"
+        }
+    }
+    foreach ($requiredPattern in @(
+        '最多(?:保留|维护|协调)?五个',
+        '禁止回退',
+        '隐藏子代理',
+        '无冲突.{0,20}并行',
+        '选择编号.{0,30}授权创建'
+    )) {
+        if ($contractText -notmatch $requiredPattern) {
+            throw "Workflow surfaces are missing a fail-closed rule: $requiredPattern"
         }
     }
 
@@ -409,6 +483,69 @@ try {
     }
     $invalidTaskPolicyCases = @(
         @{
+            Name = "max_active_tasks set to 1"
+            Mutate = {
+                param($Workflow)
+                $Workflow.task_policy.max_active_tasks = 1
+            }
+        },
+        @{
+            Name = "queued tasks not occupying a slot"
+            Mutate = {
+                param($Workflow)
+                $Workflow.task_policy.blocked_waiting_or_queued_occupies_slot = $false
+            }
+        },
+        @{
+            Name = "a missing user-visible execution-task requirement"
+            Mutate = {
+                param($Workflow)
+                $Workflow.task_policy.execution_task_requirement = "hub_execution_allowed"
+            }
+        },
+        @{
+            Name = "selection authorizing hub execution"
+            Mutate = {
+                param($Workflow)
+                $Workflow.task_policy.selected_item_authorization = "authorize_hub_execution"
+            }
+        },
+        @{
+            Name = "task-management failure allowing hub fallback"
+            Mutate = {
+                param($Workflow)
+                $Workflow.task_policy.task_management_failure = "continue_in_hub"
+            }
+        },
+        @{
+            Name = "hidden subagents substituting for user-visible tasks"
+            Mutate = {
+                param($Workflow)
+                $Workflow.task_policy.hidden_subagents = "may_substitute"
+            }
+        },
+        @{
+            Name = "a project hub allowed to execute"
+            Mutate = {
+                param($Workflow)
+                $Workflow.execution_policy.project_hub_role = "execute"
+            }
+        },
+        @{
+            Name = "project hub execution fallback enabled"
+            Mutate = {
+                param($Workflow)
+                $Workflow.execution_policy.project_hub_execution_fallback = "allowed"
+            }
+        },
+        @{
+            Name = "non-conflicting operations forced serial"
+            Mutate = {
+                param($Workflow)
+                $Workflow.execution_policy.non_conflicting_operations = "serial"
+            }
+        },
+        @{
             Name = "an incorrect max_active_tasks_applies_to"
             Mutate = {
                 param($Workflow)
@@ -654,6 +791,59 @@ try {
         throw "Rejected invalid NOOP unexpectedly created a transaction."
     }
 
+    $versionedProjectName = "Versioned Upgrade Project"
+    New-VersionedFixture $versionedTarget $versionedProjectName
+    $versionedTreeBefore = Get-DeployedDigest $versionedTarget
+    $versionedManifestPath = Join-Path $versionedTarget ".project-flow/manifest.json"
+    $versionedManifestHashBefore = (Get-FileHash -Algorithm SHA256 -LiteralPath $versionedManifestPath).Hash
+    $versionedPlan = @(& $upgrade -Target $versionedTarget -Plan *>&1 | ForEach-Object { $_.ToString() })
+    if ($LASTEXITCODE -ne 0) { throw "0.3.0 upgrade plan failed." }
+    $versionedPlanText = $versionedPlan -join "`n"
+    if ($versionedPlanText -notmatch '(?m)^UPGRADE 0\.3\.0 -> 0\.3\.1$' -or
+        $versionedPlanText -notmatch '(?m)^REPLACE\s+structured_manual\s+\.agents/workflow\.json$') {
+        throw "0.3.0 upgrade plan did not expose the required 0.3.1 replacement."
+    }
+    if ((Get-DeployedDigest $versionedTarget) -cne $versionedTreeBefore -or
+        (Get-FileHash -Algorithm SHA256 -LiteralPath $versionedManifestPath).Hash -cne $versionedManifestHashBefore) {
+        throw "0.3.0 upgrade plan mutated the project."
+    }
+    $versionedApply = @(& $upgrade -Target $versionedTarget -Apply *>&1 | ForEach-Object { $_.ToString() })
+    if ($LASTEXITCODE -ne 0) { throw "0.3.0 upgrade apply failed." }
+    $versionedMatch = [regex]::Match(($versionedApply -join "`n"), '(?m)^APPLIED (?<id>[A-Za-z0-9][A-Za-z0-9._-]*)$')
+    if (-not $versionedMatch.Success) { throw "0.3.0 upgrade apply did not report a transaction." }
+    $versionedTransaction = $versionedMatch.Groups["id"].Value
+    Assert-ManifestContract $versionedTarget $versionedProjectName
+    $versionedManifest = Get-Content -Raw -Encoding UTF8 -LiteralPath $versionedManifestPath | ConvertFrom-Json
+    $versionedMetaPath = Join-Path $versionedTarget ".project-flow/transactions/$versionedTransaction/transaction.json"
+    $versionedMeta = Get-Content -Raw -Encoding UTF8 -LiteralPath $versionedMetaPath | ConvertFrom-Json
+    if ((Get-NormalizedTextHash (Get-NormalizedText $versionedManifestPath)) -cne $versionedMeta.new_manifest_hash) {
+        throw "0.3.0 upgrade apply produced a manifest outside its recorded transaction hash."
+    }
+    if ($versionedManifest.workflow_version -cne "0.3.1" -or
+        $versionedManifest.last_transaction -cne $versionedTransaction) {
+        throw "0.3.0 upgrade did not advance the manifest to 0.3.1."
+    }
+    $versionedTransactionCount = @(Get-ChildItem -LiteralPath (Join-Path $versionedTarget ".project-flow/transactions") -Directory).Count
+    $versionedNoop = @(& $upgrade -Target $versionedTarget -Apply *>&1 | ForEach-Object { $_.ToString() })
+    if ($LASTEXITCODE -ne 0 -or ($versionedNoop -join "`n") -notmatch '(?m)^NOOP already up to date$' -or
+        @(Get-ChildItem -LiteralPath (Join-Path $versionedTarget ".project-flow/transactions") -Directory).Count -ne $versionedTransactionCount) {
+        throw "Second 0.3.1 apply did not remain a transaction-free NOOP."
+    }
+    if ((Get-NormalizedTextHash (Get-NormalizedText $versionedManifestPath)) -cne $versionedMeta.new_manifest_hash) {
+        throw "Second 0.3.1 apply changed the manifest during NOOP."
+    }
+    try {
+        $versionedRollback = @(& $upgrade -Target $versionedTarget -Rollback $versionedTransaction *>&1 | ForEach-Object { $_.ToString() })
+    } catch {
+        throw "0.3.0 upgrade rollback invocation failed: $($_.Exception.Message)"
+    }
+    if ($LASTEXITCODE -ne 0 -or ($versionedRollback -join "`n") -notmatch
+        "(?m)^ROLLED_BACK $([regex]::Escape($versionedTransaction))$" -or
+        (Get-DeployedDigest $versionedTarget) -cne $versionedTreeBefore -or
+        (Get-FileHash -Algorithm SHA256 -LiteralPath $versionedManifestPath).Hash -cne $versionedManifestHashBefore) {
+        throw "0.3.0 upgrade rollback did not restore the original project and manifest."
+    }
+
     $legacyProjectName = "Legacy Upgrade Project"
     New-LegacyFixture $upgradeTarget $legacyProjectName
     $legacyStatePath = Join-Path $upgradeTarget "docs/PROJECT_STATE.md"
@@ -679,13 +869,13 @@ try {
         throw "Rejected legacy upgrade unexpectedly created a manifest."
     }
 
-    $legacyPlan = @(& $upgrade -Target $upgradeTarget -AdoptFrom "0.2.0" -Plan 2>&1 | ForEach-Object { $_.ToString() })
+    $legacyPlan = @(& $upgrade -Target $upgradeTarget -AdoptFrom "0.2.0" -Plan *>&1 | ForEach-Object { $_.ToString() })
     if ($LASTEXITCODE -ne 0) { throw "Legacy adoption plan failed." }
     $legacyPlanText = $legacyPlan -join "`n"
-    if ($legacyPlanText -notmatch '(?m)^UPGRADE 0\.2\.0 -> 0\.3\.0$' -or
+    if ($legacyPlanText -notmatch '(?m)^UPGRADE 0\.2\.0 -> 0\.3\.1$' -or
         $legacyPlanText -notmatch '(?m)^CREATE\s+replace_if_unmodified\s+\.agents/prompts/09_execution_handoff\.md$' -or
         $legacyPlanText -notmatch '(?m)^PRESERVE\s+seed_once\s+docs/PROJECT_STATE\.md$') {
-        throw "Legacy adoption plan did not expose the required 0.3 create and preserve decisions."
+        throw "Legacy adoption plan did not expose the required 0.3.1 create and preserve decisions."
     }
     if ((Get-DeployedDigest $upgradeTarget) -cne $legacyTreeBefore -or
         (Test-Path -LiteralPath (Join-Path $upgradeTarget ".project-flow/manifest.json"))) {
@@ -717,7 +907,7 @@ try {
     if ([System.IO.File]::ReadAllText($oldHub) -ceq [System.IO.File]::ReadAllText($newHub)) {
         throw "Upgrade fixture cannot prove replacement because the old and new hub prompts are identical."
     }
-    $legacyApply = @(& $upgrade -Target $upgradeTarget -AdoptFrom "0.2.0" -Apply 2>&1 | ForEach-Object { $_.ToString() })
+    $legacyApply = @(& $upgrade -Target $upgradeTarget -AdoptFrom "0.2.0" -Apply *>&1 | ForEach-Object { $_.ToString() })
     if ($LASTEXITCODE -ne 0) { throw "Legacy adoption apply failed." }
     $transactionMatch = [regex]::Match(($legacyApply -join "`n"), '(?m)^APPLIED (?<id>[A-Za-z0-9][A-Za-z0-9._-]*)$')
     if (-not $transactionMatch.Success) { throw "Legacy adoption apply did not report a transaction." }
@@ -727,11 +917,11 @@ try {
     }
     if ([System.IO.File]::ReadAllText((Join-Path $upgradeTarget ".agents/prompts/00_project_hub.md")) -cne
         [System.IO.File]::ReadAllText($newHub)) {
-        throw "An unchanged legacy managed file was not updated to the 0.3 source."
+        throw "An unchanged legacy managed file was not updated to the 0.3.1 source."
     }
     if ([System.IO.File]::ReadAllText((Join-Path $upgradeTarget ".agents/prompts/09_execution_handoff.md")) -cne
         [System.IO.File]::ReadAllText((Join-Path $repoRoot ".agents/prompts/09_execution_handoff.md"))) {
-        throw "Legacy adoption did not install the 0.3 execution-task handoff prompt."
+        throw "Legacy adoption did not install the 0.3.1 execution-task handoff prompt."
     }
     if ([System.IO.File]::ReadAllText($legacyStatePath) -cne $legacyStateBefore) {
         throw "Legacy adoption changed docs/PROJECT_STATE.md."
@@ -747,7 +937,7 @@ try {
     $transactionCountBefore = @(Get-ChildItem -LiteralPath $transactionRoot -Directory).Count
     $manifestPath = Join-Path $upgradeTarget ".project-flow/manifest.json"
     $manifestDigestBefore = (Get-FileHash -Algorithm SHA256 -LiteralPath $manifestPath).Hash
-    $noopOutput = @(& $upgrade -Target $upgradeTarget -Apply 2>&1 | ForEach-Object { $_.ToString() })
+    $noopOutput = @(& $upgrade -Target $upgradeTarget -Apply *>&1 | ForEach-Object { $_.ToString() })
     if ($LASTEXITCODE -ne 0 -or ($noopOutput -join "`n") -notmatch '(?m)^NOOP already up to date$') {
         throw "Second upgrade apply did not report NOOP."
     }
@@ -756,7 +946,11 @@ try {
         throw "NOOP apply created a transaction or changed the manifest."
     }
 
-    $rollbackOutput = @(& $upgrade -Target $upgradeTarget -Rollback $legacyTransaction 2>&1 | ForEach-Object { $_.ToString() })
+    try {
+        $rollbackOutput = @(& $upgrade -Target $upgradeTarget -Rollback $legacyTransaction *>&1 | ForEach-Object { $_.ToString() })
+    } catch {
+        throw "Legacy adoption rollback invocation failed: $($_.Exception.Message)"
+    }
     if ($LASTEXITCODE -ne 0 -or ($rollbackOutput -join "`n") -notmatch "(?m)^ROLLED_BACK $([regex]::Escape($legacyTransaction))$") {
         throw "Upgrade rollback did not report the restored transaction."
     }
@@ -772,7 +966,7 @@ try {
     $conflictHub = Join-Path $conflictTarget ".agents/prompts/00_project_hub.md"
     [System.IO.File]::AppendAllText($conflictHub, "`nlocal project-hub customization`n", $utf8NoBom)
     $conflictTreeBefore = Get-DeployedDigest $conflictTarget
-    $conflictOutput = @(& $upgrade -Target $conflictTarget -AdoptFrom "0.2.0" -Apply 2>&1 | ForEach-Object { $_.ToString() })
+    $conflictOutput = @(& $upgrade -Target $conflictTarget -AdoptFrom "0.2.0" -Apply *>&1 | ForEach-Object { $_.ToString() })
     $conflictStatus = $LASTEXITCODE
     if ($conflictStatus -ne 4) {
         throw "Conflicting legacy adoption returned $conflictStatus instead of 4: $($conflictOutput -join ' ')"
@@ -793,7 +987,7 @@ try {
     $conflictHubBefore = [System.IO.File]::ReadAllText($conflictHub)
     $acceptedTreeBefore = Get-DeployedDigest $conflictTarget
     $acceptedOutput = @(
-        & $upgrade -Target $conflictTarget -AdoptFrom "0.2.0" -Apply -AcceptLocal ".agents/prompts/00_project_hub.md" 2>&1 |
+        & $upgrade -Target $conflictTarget -AdoptFrom "0.2.0" -Apply -AcceptLocal ".agents/prompts/00_project_hub.md" *>&1 |
             ForEach-Object { $_.ToString() }
     )
     if ($LASTEXITCODE -ne 0 -or ($acceptedOutput -join "`n") -notmatch
@@ -813,6 +1007,10 @@ try {
     if (@($acceptedMeta.accepted_local).Count -ne 1 -or
         [string]$acceptedMeta.accepted_local[0] -cne ".agents/prompts/00_project_hub.md") {
         throw "Accepted local path was not recorded in transaction metadata."
+    }
+    $acceptedManifestPath = Join-Path $conflictTarget ".project-flow/manifest.json"
+    if ((Get-NormalizedTextHash (Get-NormalizedText $acceptedManifestPath)) -cne $acceptedMeta.new_manifest_hash) {
+        throw "Accepted-local apply produced a manifest outside its recorded transaction hash."
     }
     & $upgrade -Target $conflictTarget -Rollback $acceptedTransaction *> $null
     if ($LASTEXITCODE -ne 0 -or (Get-DeployedDigest $conflictTarget) -cne $acceptedTreeBefore -or

@@ -141,7 +141,11 @@ function Read-NormalizedText([string]$Path, [string]$Label) {
 
 function Read-JsonFile([string]$Path, [string]$Label) {
     try {
-        return (Read-NormalizedText $Path $Label) | ConvertFrom-Json
+        $text = Read-NormalizedText $Path $Label
+        if ($text -notmatch '^\s*\{') { throw "JSON root must be an object" }
+        $parsed = $text | ConvertFrom-Json
+        if ($parsed -isnot [pscustomobject]) { throw "JSON root must be an object" }
+        return $parsed
     } catch {
         throw "$Label is invalid JSON: $($_.Exception.Message)"
     }
@@ -165,7 +169,7 @@ function Write-AtomicText([string]$Path, [string]$Text) {
     try {
         [System.IO.File]::WriteAllText($temporary, $Text, $utf8NoBom)
         if ($exists) {
-            [System.IO.File]::Replace($temporary, $Path, $null)
+            [System.IO.File]::Move($temporary, $Path, $true)
         } else {
             [System.IO.File]::Move($temporary, $Path)
         }

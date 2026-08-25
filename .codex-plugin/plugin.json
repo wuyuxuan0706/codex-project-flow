@@ -1,7 +1,7 @@
 {
   "name": "codex-project-flow",
-  "version": "0.3.0+codex.20260822090049",
-  "description": "Install and safely upgrade a reusable Codex workflow with one permanent project hub and bounded execution-task generations.",
+  "version": "0.3.1+codex.20260825065544",
+  "description": "Install and safely upgrade a reusable Codex workflow with one permanent coordination-only project hub and up to five user-visible execution tasks.",
   "author": {
     "name": "codex-project-flow contributors"
   },
@@ -15,7 +15,7 @@
   "interface": {
     "displayName": "Codex Project Flow",
     "shortDescription": "Bootstrap, upgrade, and rotate a permanent project workflow.",
-    "longDescription": "Adopts the bootstrap task as the permanent project hub, safely upgrades installed workflow files, and rotates bounded execution-task generations with explicit handoffs.",
+    "longDescription": "Adopts the bootstrap task as a coordination-only permanent project hub, safely upgrades installed workflow files, and coordinates up to five user-visible execution tasks with fail-closed task management.",
     "developerName": "codex-project-flow contributors",
     "category": "Productivity",
     "capabilities": [

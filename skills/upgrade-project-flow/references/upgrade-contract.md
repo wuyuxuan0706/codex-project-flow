@@ -6,6 +6,8 @@ The default mode and `--plan`/`-Plan` are read-only. `--apply`/`-Apply` may muta
 
 An ordinary deployed project must have `.project-flow/manifest.json`. A legacy project without it is eligible only when the caller explicitly supplies `--adopt-from 0.2.0` or `-AdoptFrom 0.2.0`. Adoption derives the project name from the installed workflow configuration, compares against the immutable 0.2.0 baseline, and writes the first manifest only as the final step of a successful apply.
 
+When the installed version differs from the destination, the upgrader requires the exact single-hop descriptor `migrations/<installed>-to-<destination>.json` and the immutable `baselines/<installed>/` tree. The descriptor identifies introduced paths; all other managed paths must have an old-version baseline. Descriptors are not chained implicitly.
+
 The manifest owns the installed workflow version, project name, and normalized baseline hash for each managed path. Text hashes are SHA-256 over UTF-8 text after removing one BOM and normalizing CRLF or CR to LF.
 
 ## B/L/N decisions

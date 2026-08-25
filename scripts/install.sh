@@ -4,12 +4,13 @@ set -eu
 script_root=$(CDPATH= cd -P "$(dirname "$0")" && pwd -P)
 plugin_root=$(CDPATH= cd -P "$script_root/.." && pwd -P)
 
-command -v python3 >/dev/null 2>&1 || {
-    echo "python3 is required by install.sh" >&2
+python_cmd=${PYTHON:-python3}
+command -v "$python_cmd" >/dev/null 2>&1 || {
+    echo "$python_cmd is required by install.sh" >&2
     exit 3
 }
 
-exec python3 - "$plugin_root" "$@" <<'PY'
+exec "$python_cmd" - "$plugin_root" "$@" <<'PY'
 import argparse
 import datetime
 import hashlib
