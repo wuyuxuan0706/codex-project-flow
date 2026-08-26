@@ -1,4 +1,4 @@
 interface:
   display_name: "Upgrade Project Flow"
-  short_description: "Safely plan, apply, or roll back workflow upgrades"
-  default_prompt: "Use $upgrade-project-flow to plan a safe update for this deployed project workflow."
+  short_description: "Upgrade managed workflow content and reconcile active tasks"
+  default_prompt: "Use $upgrade-project-flow to plan this deployed workflow update; if I explicitly authorize apply, prefer upstream for plugin-owned conflicts, preserve declared project content, and coordinate active tasks with exact version handshakes."

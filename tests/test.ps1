@@ -8,7 +8,9 @@ $emptyTarget = Join-Path $testRoot "empty-project"
 $existingTarget = Join-Path $testRoot "existing-project"
 $legacyTarget = Join-Path $testRoot "legacy-project"
 $versionedTarget = Join-Path $testRoot "versioned-project"
+$previousTarget = Join-Path $testRoot "previous-project"
 $upgradeTarget = Join-Path $testRoot "upgrade-project"
+$ownershipTarget = Join-Path $testRoot "ownership-project"
 $conflictTarget = Join-Path $testRoot "conflict-project"
 $noopInvalidTarget = Join-Path $testRoot "noop-invalid-project"
 $controlTarget = Join-Path $testRoot "control-project"
@@ -54,7 +56,7 @@ function Assert-ManifestContract([string]$Target, [string]$ProjectName) {
         throw "Manifest is missing: $manifestPath"
     }
     $manifest = Get-Content -Raw -Encoding UTF8 -LiteralPath $manifestPath | ConvertFrom-Json
-    if ($managed.workflow_version -cne "0.3.1" -or $manifest.schema_version -ne 1 -or
+    if ($managed.workflow_version -cne "0.4.1" -or $manifest.schema_version -ne 1 -or
         $manifest.workflow_version -cne $managed.workflow_version -or $manifest.project_name -cne $ProjectName) {
         throw "Manifest metadata is inconsistent with managed-files.json."
     }
@@ -93,6 +95,9 @@ function Assert-ManifestContract([string]$Target, [string]$ProjectName) {
     if (@($actual | Where-Object { $_.path -ceq ".agents/prompts/09_execution_handoff.md" }).Count -ne 1) {
         throw "Manifest does not manage the execution-task handoff prompt exactly once."
     }
+    if (@($actual | Where-Object { $_.path -ceq ".agents/prompts/10_upgrade_coordination.md" }).Count -ne 1) {
+        throw "Manifest does not manage the upgrade-coordination prompt exactly once."
+    }
 }
 
 function New-LegacyFixture([string]$Target, [string]$ProjectName) {
@@ -112,13 +117,18 @@ function New-LegacyFixture([string]$Target, [string]$ProjectName) {
     }
 }
 
-function New-VersionedFixture([string]$Target, [string]$ProjectName) {
-    $baselineRoot = Join-Path $repoRoot "baselines/0.3.0"
+function New-VersionedFixture([string]$Target, [string]$ProjectName, [string]$Version = "0.3.0") {
+    $baselineRoot = Join-Path $repoRoot "baselines/$Version"
     $managed = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $repoRoot "managed-files.json") |
         ConvertFrom-Json
+    $migration = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $repoRoot "migrations/$Version-to-0.4.1.json") |
+        ConvertFrom-Json
+    $introduced = @{}
+    foreach ($relative in @($migration.introduced_files)) { $introduced[[string]$relative] = $true }
     $manifestFiles = New-Object System.Collections.Generic.List[object]
     foreach ($entry in @($managed.files)) {
         $relative = [string]$entry.path
+        if ($introduced.ContainsKey($relative)) { continue }
         $source = Join-Path $baselineRoot $relative
         $destination = Join-Path $Target $relative
         [System.IO.Directory]::CreateDirectory((Split-Path -Parent $destination)) | Out-Null
@@ -139,7 +149,7 @@ function New-VersionedFixture([string]$Target, [string]$ProjectName) {
     }
     $manifest = [ordered]@{
         schema_version = 1
-        workflow_version = "0.3.0"
+        workflow_version = $Version
         project_name = $ProjectName
         installed_at_utc = "2026-08-22T00:00:00Z"
         last_transaction = $null
@@ -170,7 +180,9 @@ try {
     [System.IO.Directory]::CreateDirectory($existingTarget) | Out-Null
     [System.IO.Directory]::CreateDirectory($legacyTarget) | Out-Null
     [System.IO.Directory]::CreateDirectory($versionedTarget) | Out-Null
+    [System.IO.Directory]::CreateDirectory($previousTarget) | Out-Null
     [System.IO.Directory]::CreateDirectory($upgradeTarget) | Out-Null
+    [System.IO.Directory]::CreateDirectory($ownershipTarget) | Out-Null
     [System.IO.Directory]::CreateDirectory($conflictTarget) | Out-Null
     [System.IO.Directory]::CreateDirectory($noopInvalidTarget) | Out-Null
     [System.IO.Directory]::CreateDirectory($controlTarget) | Out-Null
@@ -377,6 +389,9 @@ try {
     if (-not (Test-Path -LiteralPath (Join-Path $emptyTarget ".agents/prompts/09_execution_handoff.md") -PathType Leaf)) {
         throw "Installer did not copy the execution-task handoff prompt."
     }
+    if (-not (Test-Path -LiteralPath (Join-Path $emptyTarget ".agents/prompts/10_upgrade_coordination.md") -PathType Leaf)) {
+        throw "Installer did not copy the upgrade-coordination prompt."
+    }
     $rotationKeyFormat = '[codex-project-flow:execution:v1] projectId=<exactProjectId>; hubThreadId=<exactHubThreadId>; predecessorThreadId=<exactPredecessorThreadId>; generation=<positiveInteger>'
     foreach ($rotationIdentityRelative in @(
         ".agents/workflow.json",
@@ -387,6 +402,32 @@ try {
             throw "Execution-task rotation identity is missing from $rotationIdentityRelative"
         }
     }
+    $successorKeyFormat = '[codex-project-flow:execution:v2] projectId=<exactProjectId>; hubThreadId=<exactHubThreadId>; predecessorThreadId=<exactPredecessorThreadId>; generation=<positiveInteger>; workflowVersion=<exactWorkflowVersion>; upgradeTransaction=<exactUpgradeTransaction>'
+    $taskHandshakeFormat = '[codex-project-flow:handshake:v1] projectId=<exactProjectId>; hubThreadId=<exactHubThreadId>; workflowVersion=<exactWorkflowVersion>; upgradeTransaction=<exactUpgradeTransaction>; generation=<positiveInteger>'
+    $hubHandshakeFormat = '[codex-project-flow:hub-handshake:v1] projectId=<exactProjectId>; hubThreadId=<exactHubThreadId>; workflowVersion=<exactWorkflowVersion>; upgradeTransaction=<exactUpgradeTransaction>'
+    foreach ($upgradeIdentityRelative in @(
+        ".agents/workflow.json",
+        ".agents/prompts/00_project_hub.md",
+        ".agents/prompts/09_execution_handoff.md",
+        ".agents/prompts/10_upgrade_coordination.md"
+    )) {
+        if (-not [System.IO.File]::ReadAllText((Join-Path $emptyTarget $upgradeIdentityRelative)).Contains($successorKeyFormat)) {
+            throw "Upgrade successor identity is missing from $upgradeIdentityRelative"
+        }
+    }
+    $installedUpgradePromptPath = Join-Path $emptyTarget ".agents/prompts/10_upgrade_coordination.md"
+    $validUpgradePrompt = [System.IO.File]::ReadAllText($installedUpgradePromptPath)
+    foreach ($requiredHandshake in @($taskHandshakeFormat, $hubHandshakeFormat)) {
+        if (-not $validUpgradePrompt.Contains($requiredHandshake)) {
+            throw "Upgrade coordination prompt is missing handshake: $requiredHandshake"
+        }
+    }
+    [System.IO.File]::WriteAllText($installedUpgradePromptPath, "$successorKeyFormat`n", $utf8NoBom)
+    & $validate -Target $emptyTarget *> $null
+    if ($LASTEXITCODE -eq 0) {
+        throw "Validator accepted a fake upgrade prompt containing only the v2 successor key."
+    }
+    [System.IO.File]::WriteAllText($installedUpgradePromptPath, $validUpgradePrompt, $utf8NoBom)
     $installedHubPromptPath = Join-Path $emptyTarget ".agents/prompts/00_project_hub.md"
     $validHubPrompt = [System.IO.File]::ReadAllText($installedHubPromptPath)
     [System.IO.File]::WriteAllText(
@@ -480,6 +521,17 @@ try {
     & $validate -Target $emptyTarget
     if ($LASTEXITCODE -eq 0) {
         throw "Validator accepted a non-string handoff_policy.only_when entry."
+    }
+    $invalidConfig = $validConfigText | ConvertFrom-Json
+    $invalidConfig.upgrade_policy.failure_behavior = "release_barrier_and_continue"
+    [System.IO.File]::WriteAllText(
+        (Join-Path $emptyTarget ".agents/workflow.json"),
+        ($invalidConfig | ConvertTo-Json -Depth 20),
+        $utf8NoBom
+    )
+    & $validate -Target $emptyTarget *> $null
+    if ($LASTEXITCODE -eq 0) {
+        throw "Validator accepted an upgrade policy that releases the barrier on failure."
     }
     $invalidTaskPolicyCases = @(
         @{
@@ -791,6 +843,45 @@ try {
         throw "Rejected invalid NOOP unexpectedly created a transaction."
     }
 
+    $previousProjectName = "Previous Upgrade Project"
+    New-VersionedFixture $previousTarget $previousProjectName "0.3.1"
+    $previousTreeBefore = Get-DeployedDigest $previousTarget
+    $previousManifestPath = Join-Path $previousTarget ".project-flow/manifest.json"
+    $previousManifestHashBefore = (Get-FileHash -Algorithm SHA256 -LiteralPath $previousManifestPath).Hash
+    $previousPlan = @(& $upgrade -Target $previousTarget -Plan *>&1 | ForEach-Object { $_.ToString() })
+    if ($LASTEXITCODE -ne 0) { throw "0.3.1 upgrade plan failed." }
+    $previousPlanText = $previousPlan -join "`n"
+    if ($previousPlanText -notmatch '(?m)^UPGRADE 0\.3\.1 -> 0\.4\.1$' -or
+        $previousPlanText -notmatch '(?m)^CREATE\s+replace_if_unmodified\s+\.agents/prompts/10_upgrade_coordination\.md$') {
+        throw "0.3.1 upgrade plan did not expose the required 0.4.1 coordination prompt."
+    }
+    if ((Get-DeployedDigest $previousTarget) -cne $previousTreeBefore -or
+        (Get-FileHash -Algorithm SHA256 -LiteralPath $previousManifestPath).Hash -cne $previousManifestHashBefore) {
+        throw "0.3.1 upgrade plan mutated the project."
+    }
+    $previousApply = @(& $upgrade -Target $previousTarget -Apply *>&1 | ForEach-Object { $_.ToString() })
+    if ($LASTEXITCODE -ne 0) { throw "0.3.1 upgrade apply failed." }
+    $previousMatch = [regex]::Match(($previousApply -join "`n"), '(?m)^APPLIED (?<id>[A-Za-z0-9][A-Za-z0-9._-]*)$')
+    if (-not $previousMatch.Success) { throw "0.3.1 upgrade apply did not report a transaction." }
+    $previousTransaction = $previousMatch.Groups["id"].Value
+    Assert-ManifestContract $previousTarget $previousProjectName
+    $previousManifest = Get-Content -Raw -Encoding UTF8 -LiteralPath $previousManifestPath | ConvertFrom-Json
+    if ($previousManifest.workflow_version -cne "0.4.1" -or
+        $previousManifest.last_transaction -cne $previousTransaction) {
+        throw "0.3.1 upgrade did not advance the manifest to 0.4.1."
+    }
+    $previousTransactionCount = @(Get-ChildItem -LiteralPath (Join-Path $previousTarget ".project-flow/transactions") -Directory).Count
+    $previousNoop = @(& $upgrade -Target $previousTarget -Apply *>&1 | ForEach-Object { $_.ToString() })
+    if ($LASTEXITCODE -ne 0 -or ($previousNoop -join "`n") -notmatch '(?m)^NOOP already up to date$' -or
+        @(Get-ChildItem -LiteralPath (Join-Path $previousTarget ".project-flow/transactions") -Directory).Count -ne $previousTransactionCount) {
+        throw "Second 0.4.1 apply after 0.3.1 upgrade did not remain a transaction-free NOOP."
+    }
+    & $upgrade -Target $previousTarget -Rollback $previousTransaction *> $null
+    if ($LASTEXITCODE -ne 0 -or (Get-DeployedDigest $previousTarget) -cne $previousTreeBefore -or
+        (Get-FileHash -Algorithm SHA256 -LiteralPath $previousManifestPath).Hash -cne $previousManifestHashBefore) {
+        throw "0.3.1 upgrade rollback did not restore the original project and manifest."
+    }
+
     $versionedProjectName = "Versioned Upgrade Project"
     New-VersionedFixture $versionedTarget $versionedProjectName
     $versionedTreeBefore = Get-DeployedDigest $versionedTarget
@@ -799,9 +890,10 @@ try {
     $versionedPlan = @(& $upgrade -Target $versionedTarget -Plan *>&1 | ForEach-Object { $_.ToString() })
     if ($LASTEXITCODE -ne 0) { throw "0.3.0 upgrade plan failed." }
     $versionedPlanText = $versionedPlan -join "`n"
-    if ($versionedPlanText -notmatch '(?m)^UPGRADE 0\.3\.0 -> 0\.3\.1$' -or
-        $versionedPlanText -notmatch '(?m)^REPLACE\s+structured_manual\s+\.agents/workflow\.json$') {
-        throw "0.3.0 upgrade plan did not expose the required 0.3.1 replacement."
+    if ($versionedPlanText -notmatch '(?m)^UPGRADE 0\.3\.0 -> 0\.4\.1$' -or
+        $versionedPlanText -notmatch '(?m)^REPLACE\s+structured_manual\s+\.agents/workflow\.json$' -or
+        $versionedPlanText -notmatch '(?m)^CREATE\s+replace_if_unmodified\s+\.agents/prompts/10_upgrade_coordination\.md$') {
+        throw "0.3.0 upgrade plan did not expose the required 0.4.1 replacements."
     }
     if ((Get-DeployedDigest $versionedTarget) -cne $versionedTreeBefore -or
         (Get-FileHash -Algorithm SHA256 -LiteralPath $versionedManifestPath).Hash -cne $versionedManifestHashBefore) {
@@ -819,18 +911,18 @@ try {
     if ((Get-NormalizedTextHash (Get-NormalizedText $versionedManifestPath)) -cne $versionedMeta.new_manifest_hash) {
         throw "0.3.0 upgrade apply produced a manifest outside its recorded transaction hash."
     }
-    if ($versionedManifest.workflow_version -cne "0.3.1" -or
+    if ($versionedManifest.workflow_version -cne "0.4.1" -or
         $versionedManifest.last_transaction -cne $versionedTransaction) {
-        throw "0.3.0 upgrade did not advance the manifest to 0.3.1."
+        throw "0.3.0 upgrade did not advance the manifest to 0.4.1."
     }
     $versionedTransactionCount = @(Get-ChildItem -LiteralPath (Join-Path $versionedTarget ".project-flow/transactions") -Directory).Count
     $versionedNoop = @(& $upgrade -Target $versionedTarget -Apply *>&1 | ForEach-Object { $_.ToString() })
     if ($LASTEXITCODE -ne 0 -or ($versionedNoop -join "`n") -notmatch '(?m)^NOOP already up to date$' -or
         @(Get-ChildItem -LiteralPath (Join-Path $versionedTarget ".project-flow/transactions") -Directory).Count -ne $versionedTransactionCount) {
-        throw "Second 0.3.1 apply did not remain a transaction-free NOOP."
+        throw "Second 0.4.1 apply did not remain a transaction-free NOOP."
     }
     if ((Get-NormalizedTextHash (Get-NormalizedText $versionedManifestPath)) -cne $versionedMeta.new_manifest_hash) {
-        throw "Second 0.3.1 apply changed the manifest during NOOP."
+        throw "Second 0.4.1 apply changed the manifest during NOOP."
     }
     try {
         $versionedRollback = @(& $upgrade -Target $versionedTarget -Rollback $versionedTransaction *>&1 | ForEach-Object { $_.ToString() })
@@ -872,10 +964,11 @@ try {
     $legacyPlan = @(& $upgrade -Target $upgradeTarget -AdoptFrom "0.2.0" -Plan *>&1 | ForEach-Object { $_.ToString() })
     if ($LASTEXITCODE -ne 0) { throw "Legacy adoption plan failed." }
     $legacyPlanText = $legacyPlan -join "`n"
-    if ($legacyPlanText -notmatch '(?m)^UPGRADE 0\.2\.0 -> 0\.3\.1$' -or
+    if ($legacyPlanText -notmatch '(?m)^UPGRADE 0\.2\.0 -> 0\.4\.1$' -or
         $legacyPlanText -notmatch '(?m)^CREATE\s+replace_if_unmodified\s+\.agents/prompts/09_execution_handoff\.md$' -or
+        $legacyPlanText -notmatch '(?m)^CREATE\s+replace_if_unmodified\s+\.agents/prompts/10_upgrade_coordination\.md$' -or
         $legacyPlanText -notmatch '(?m)^PRESERVE\s+seed_once\s+docs/PROJECT_STATE\.md$') {
-        throw "Legacy adoption plan did not expose the required 0.3.1 create and preserve decisions."
+        throw "Legacy adoption plan did not expose the required 0.4.1 create and preserve decisions."
     }
     if ((Get-DeployedDigest $upgradeTarget) -cne $legacyTreeBefore -or
         (Test-Path -LiteralPath (Join-Path $upgradeTarget ".project-flow/manifest.json"))) {
@@ -917,11 +1010,15 @@ try {
     }
     if ([System.IO.File]::ReadAllText((Join-Path $upgradeTarget ".agents/prompts/00_project_hub.md")) -cne
         [System.IO.File]::ReadAllText($newHub)) {
-        throw "An unchanged legacy managed file was not updated to the 0.3.1 source."
+        throw "An unchanged legacy managed file was not updated to the 0.4.1 source."
     }
     if ([System.IO.File]::ReadAllText((Join-Path $upgradeTarget ".agents/prompts/09_execution_handoff.md")) -cne
         [System.IO.File]::ReadAllText((Join-Path $repoRoot ".agents/prompts/09_execution_handoff.md"))) {
-        throw "Legacy adoption did not install the 0.3.1 execution-task handoff prompt."
+        throw "Legacy adoption did not install the 0.4.1 execution-task handoff prompt."
+    }
+    if ([System.IO.File]::ReadAllText((Join-Path $upgradeTarget ".agents/prompts/10_upgrade_coordination.md")) -cne
+        [System.IO.File]::ReadAllText((Join-Path $repoRoot ".agents/prompts/10_upgrade_coordination.md"))) {
+        throw "Legacy adoption did not install the 0.4.1 upgrade-coordination prompt."
     }
     if ([System.IO.File]::ReadAllText($legacyStatePath) -cne $legacyStateBefore) {
         throw "Legacy adoption changed docs/PROJECT_STATE.md."
@@ -958,13 +1055,66 @@ try {
         throw "Rollback did not restore the complete pre-upgrade deployed state."
     }
     if ((Test-Path -LiteralPath $manifestPath) -or
-        (Test-Path -LiteralPath (Join-Path $upgradeTarget ".agents/prompts/09_execution_handoff.md"))) {
+        (Test-Path -LiteralPath (Join-Path $upgradeTarget ".agents/prompts/09_execution_handoff.md")) -or
+        (Test-Path -LiteralPath (Join-Path $upgradeTarget ".agents/prompts/10_upgrade_coordination.md"))) {
         throw "Rollback did not restore the pre-adoption manifest and file set."
     }
 
+    New-VersionedFixture $ownershipTarget "Ownership Upgrade Project" "0.4.0"
+    $ownershipAgents = Join-Path $ownershipTarget "AGENTS.md"
+    $ownershipPrompt = Join-Path $ownershipTarget ".agents/prompts/10_upgrade_coordination.md"
+    $ownershipState = Join-Path $ownershipTarget "docs/PROJECT_STATE.md"
+    $agentsText = Get-NormalizedText $ownershipAgents
+    $agentsText = [regex]::Replace($agentsText, '(?m)^(## 项目事实\n)', '$1' + "`n- 必须保留的本地项目事实。`n", 1)
+    [System.IO.File]::WriteAllText($ownershipAgents, $agentsText, $utf8NoBom)
+    [System.IO.File]::AppendAllText($ownershipPrompt, "`nlocal plugin workflow customization`n", $utf8NoBom)
+    [System.IO.File]::WriteAllText($ownershipState, "# 项目状态`n`n必须保留的项目状态。`n", $utf8NoBom)
+    $ownershipTreeBefore = Get-DeployedDigest $ownershipTarget
+    $ownershipManifestPath = Join-Path $ownershipTarget ".project-flow/manifest.json"
+    $ownershipManifestBefore = (Get-FileHash -Algorithm SHA256 -LiteralPath $ownershipManifestPath).Hash
+    $ownershipPlan = @(& $upgrade -Target $ownershipTarget -Plan *>&1 | ForEach-Object { $_.ToString() }) -join "`n"
+    if ($LASTEXITCODE -ne 0 -or
+        $ownershipPlan -notmatch '(?m)^MERGE\s+merge_manual\s+AGENTS\.md$' -or
+        $ownershipPlan -notmatch '(?m)^UPSTREAM\s+replace_if_unmodified\s+\.agents/prompts/10_upgrade_coordination\.md$' -or
+        $ownershipPlan -notmatch '(?m)^PRESERVE\s+seed_once\s+docs/PROJECT_STATE\.md$') {
+        throw "0.4.0 ownership-aware plan did not expose MERGE, UPSTREAM, and PRESERVE actions."
+    }
+    $ownershipOutput = @(& $upgrade -Target $ownershipTarget -Apply *>&1 | ForEach-Object { $_.ToString() }) -join "`n"
+    $ownershipMatch = [regex]::Match($ownershipOutput, '(?m)^APPLIED (?<id>[A-Za-z0-9][A-Za-z0-9._-]*)$')
+    if ($LASTEXITCODE -ne 0 -or -not $ownershipMatch.Success) { throw "Ownership-aware apply failed: $ownershipOutput" }
+    $ownershipTransaction = $ownershipMatch.Groups["id"].Value
+    if ((Get-NormalizedText $ownershipPrompt) -cne (Get-NormalizedText (Join-Path $repoRoot ".agents/prompts/10_upgrade_coordination.md"))) {
+        throw "Plugin-owned conflict did not take the upstream workflow content."
+    }
+    $mergedAgents = Get-NormalizedText $ownershipAgents
+    if (-not $mergedAgents.Contains("必须保留的本地项目事实。") -or -not $mergedAgents.Contains("插件所有的工作流内容出现 B/L/N 双向修改时自动采用新版")) {
+        throw "Mixed AGENTS.md merge did not preserve project facts and apply upstream rules."
+    }
+    if ((Get-NormalizedText $ownershipState) -cne "# 项目状态`n`n必须保留的项目状态。`n") {
+        throw "Ownership-aware upgrade changed docs/PROJECT_STATE.md."
+    }
+    $ownershipMeta = Get-Content -Raw -Encoding UTF8 -LiteralPath (
+        Join-Path $ownershipTarget ".project-flow/transactions/$ownershipTransaction/transaction.json"
+    ) | ConvertFrom-Json
+    if (@($ownershipMeta.upstream_resolved) -cnotcontains ".agents/prompts/10_upgrade_coordination.md" -or
+        @($ownershipMeta.merged) -cnotcontains "AGENTS.md") {
+        throw "Ownership-aware resolutions were not recorded in transaction metadata."
+    }
+    Assert-ManifestContract $ownershipTarget "Ownership Upgrade Project"
+    & $upgrade -Target $ownershipTarget -Rollback $ownershipTransaction *> $null
+    if ($LASTEXITCODE -ne 0 -or (Get-DeployedDigest $ownershipTarget) -cne $ownershipTreeBefore -or
+        (Get-FileHash -Algorithm SHA256 -LiteralPath $ownershipManifestPath).Hash -cne $ownershipManifestBefore) {
+        throw "Ownership-aware rollback did not restore the 0.4.0 project."
+    }
+
     New-LegacyFixture $conflictTarget "Conflict Upgrade Project"
-    $conflictHub = Join-Path $conflictTarget ".agents/prompts/00_project_hub.md"
-    [System.IO.File]::AppendAllText($conflictHub, "`nlocal project-hub customization`n", $utf8NoBom)
+    $conflictCollision = Join-Path $conflictTarget ".agents/prompts/10_upgrade_coordination.md"
+    [System.IO.File]::WriteAllText(
+        $conflictCollision,
+        (Get-NormalizedText (Join-Path $repoRoot ".agents/prompts/10_upgrade_coordination.md")) +
+            "`n有效但尚未纳管的本地补充。`n",
+        $utf8NoBom
+    )
     $conflictTreeBefore = Get-DeployedDigest $conflictTarget
     $conflictOutput = @(& $upgrade -Target $conflictTarget -AdoptFrom "0.2.0" -Apply *>&1 | ForEach-Object { $_.ToString() })
     $conflictStatus = $LASTEXITCODE
@@ -978,26 +1128,20 @@ try {
     $stagingPlans = @(Get-ChildItem -LiteralPath (Join-Path $conflictTarget ".project-flow/staging") -Recurse -File -Filter "plan.json")
     if ($stagingPlans.Count -eq 0) { throw "Conflict handling did not create a reviewable staging plan." }
 
-    [System.IO.File]::WriteAllText(
-        $conflictHub,
-        ([System.IO.File]::ReadAllText((Join-Path $repoRoot ".agents/prompts/00_project_hub.md")) +
-            "`nlocal project-hub customization retained after manual merge`n"),
-        $utf8NoBom
-    )
-    $conflictHubBefore = [System.IO.File]::ReadAllText($conflictHub)
+    $conflictCollisionBefore = [System.IO.File]::ReadAllText($conflictCollision)
     $acceptedTreeBefore = Get-DeployedDigest $conflictTarget
     $acceptedOutput = @(
-        & $upgrade -Target $conflictTarget -AdoptFrom "0.2.0" -Apply -AcceptLocal ".agents/prompts/00_project_hub.md" *>&1 |
+        & $upgrade -Target $conflictTarget -AdoptFrom "0.2.0" -Apply -AcceptLocal ".agents/prompts/10_upgrade_coordination.md" *>&1 |
             ForEach-Object { $_.ToString() }
     )
     if ($LASTEXITCODE -ne 0 -or ($acceptedOutput -join "`n") -notmatch
-        '(?m)^ACCEPT\s+replace_if_unmodified\s+\.agents/prompts/00_project_hub\.md$') {
+        '(?m)^ACCEPT\s+replace_if_unmodified\s+\.agents/prompts/10_upgrade_coordination\.md$') {
         throw "Explicit local conflict acceptance was not reported in the apply plan."
     }
     $acceptedMatch = [regex]::Match(($acceptedOutput -join "`n"), '(?m)^APPLIED (?<id>[A-Za-z0-9][A-Za-z0-9._-]*)$')
     if (-not $acceptedMatch.Success) { throw "Explicit local conflict acceptance did not create a transaction." }
     $acceptedTransaction = $acceptedMatch.Groups["id"].Value
-    if ([System.IO.File]::ReadAllText($conflictHub) -cne $conflictHubBefore) {
+    if ([System.IO.File]::ReadAllText($conflictCollision) -cne $conflictCollisionBefore) {
         throw "Explicit local conflict acceptance overwrote the reviewed live file."
     }
     Assert-ManifestContract $conflictTarget "Conflict Upgrade Project"
@@ -1005,7 +1149,7 @@ try {
         Join-Path $conflictTarget ".project-flow/transactions/$acceptedTransaction/transaction.json"
     ) | ConvertFrom-Json
     if (@($acceptedMeta.accepted_local).Count -ne 1 -or
-        [string]$acceptedMeta.accepted_local[0] -cne ".agents/prompts/00_project_hub.md") {
+        [string]$acceptedMeta.accepted_local[0] -cne ".agents/prompts/10_upgrade_coordination.md") {
         throw "Accepted local path was not recorded in transaction metadata."
     }
     $acceptedManifestPath = Join-Path $conflictTarget ".project-flow/manifest.json"

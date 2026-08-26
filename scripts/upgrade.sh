@@ -53,6 +53,8 @@ target_root = Path(os.path.realpath(target_lexical))
 CONTROL = ".project-flow"
 MANIFEST_REL = ".project-flow/manifest.json"
 VALID_POLICIES = {"seed_once", "merge_manual", "structured_manual", "replace_if_unmodified"}
+VALID_OWNERSHIP = {"plugin", "mixed", "project"}
+VALID_CONFLICT_RESOLUTION = {"upstream_wins", "preserve_markdown_sections", "preserve"}
 
 def fail(message, code=3):
     print("ERROR " + message, file=sys.stderr)
@@ -201,6 +203,22 @@ for entry in entries:
         fail("Unsupported policy for " + rel)
     if entry.get("render") not in ("project_name", "project_name_json"):
         fail("Unsupported render mode for " + rel)
+    ownership = entry.get("ownership")
+    resolution = entry.get("conflict_resolution")
+    if ownership not in VALID_OWNERSHIP:
+        fail("Unsupported ownership for " + rel)
+    if resolution not in VALID_CONFLICT_RESOLUTION:
+        fail("Unsupported conflict_resolution for " + rel)
+    if resolution == "upstream_wins" and ownership != "plugin":
+        fail("upstream_wins requires plugin ownership for " + rel)
+    if resolution == "preserve" and ownership != "project":
+        fail("preserve requires project ownership for " + rel)
+    if resolution == "preserve_markdown_sections":
+        sections = entry.get("preserve_sections")
+        if ownership != "mixed" or not isinstance(sections, list) or not sections:
+            fail("preserve_markdown_sections requires mixed ownership and preserve_sections for " + rel)
+    elif "preserve_sections" in entry:
+        fail("preserve_sections is valid only with preserve_markdown_sections for " + rel)
     plugin_input(source_rel, "managed source")
 
 if "docs/PROJECT_STATE.md" not in seen:
@@ -208,12 +226,41 @@ if "docs/PROJECT_STATE.md" not in seen:
 state_entry = next(item for item in entries if item["path"] == "docs/PROJECT_STATE.md")
 if state_entry.get("policy") != "seed_once":
     fail("docs/PROJECT_STATE.md must use seed_once")
+if state_entry.get("ownership") != "project" or state_entry.get("conflict_resolution") != "preserve":
+    fail("docs/PROJECT_STATE.md must be project-owned and preserved")
+agents_entry = next(item for item in entries if item["path"] == "AGENTS.md")
+if (
+    agents_entry.get("ownership") != "mixed" or
+    agents_entry.get("conflict_resolution") != "preserve_markdown_sections" or
+    agents_entry.get("preserve_sections") != ["项目事实"]
+):
+    fail("AGENTS.md must preserve the 项目事实 project-content section")
 
 def render(text, render_mode, project_name):
     if render_mode == "project_name_json":
         replacement = json.dumps(project_name, ensure_ascii=False)
         return text.replace('"<PROJECT_NAME>"', replacement)
     return text.replace("<PROJECT_NAME>", project_name)
+
+def merge_protected_markdown_sections(live_text, new_text, section_names, relative):
+    merged = new_text
+    for raw_name in section_names:
+        if not isinstance(raw_name, str) or not raw_name.strip() or "\n" in raw_name or "\r" in raw_name:
+            fail("Invalid protected Markdown section for " + relative)
+        pattern = re.compile(
+            r"^##[ \t]+" + re.escape(raw_name) + r"[ \t]*\n.*?(?=^##[ \t]+|\Z)",
+            re.MULTILINE | re.DOTALL,
+        )
+        live_matches = list(pattern.finditer(live_text))
+        new_matches = list(pattern.finditer(merged))
+        if len(live_matches) != 1 or len(new_matches) != 1:
+            fail(
+                "Protected Markdown section '" + raw_name +
+                "' must appear exactly once in local and upstream " + relative
+            )
+        new_match = new_matches[0]
+        merged = merged[:new_match.start()] + live_matches[0].group(0) + merged[new_match.end():]
+    return merged
 
 def validate_project_name(name):
     if not isinstance(name, str) or not name.strip() or any(ord(ch) < 32 or ord(ch) == 127 for ch in name):
@@ -442,8 +489,10 @@ for entry in entries:
     live_text = read_normalized(live, rel) if live.is_file() else None
     live_hash = digest_text(live_text) if live_text is not None else None
     policy = entry["policy"]
+    applied_text = live_text
     if live_text is None:
         action = "CREATE"
+        applied_text = new_text
     elif base_text is None:
         action = "NOOP" if live_hash == new_hash else "CONFLICT"
     elif policy == "seed_once":
@@ -452,7 +501,21 @@ for entry in entries:
         action = "NOOP"
     elif live_hash == base_hash:
         action = "REPLACE"
+        applied_text = new_text
     elif base_hash == new_hash:
+        action = "PRESERVE"
+    elif entry["conflict_resolution"] == "upstream_wins":
+        action = "UPSTREAM"
+        applied_text = new_text
+    elif entry["conflict_resolution"] == "preserve_markdown_sections":
+        action = "MERGE"
+        applied_text = merge_protected_markdown_sections(
+            live_text,
+            new_text,
+            entry["preserve_sections"],
+            rel,
+        )
+    elif entry["conflict_resolution"] == "preserve":
         action = "PRESERVE"
     else:
         action = "CONFLICT"
@@ -460,6 +523,8 @@ for entry in entries:
         "path": rel,
         "source": entry["source"],
         "policy": policy,
+        "ownership": entry["ownership"],
+        "conflict_resolution": entry["conflict_resolution"],
         "action": action,
         "base_hash": base_hash,
         "live_hash": live_hash,
@@ -467,6 +532,7 @@ for entry in entries:
         "base_text": base_text,
         "live_text": live_text,
         "new_text": new_text,
+        "applied_text": applied_text,
     })
 
 accepted_local = set()
@@ -482,6 +548,7 @@ for raw_path in args.accept_local:
     if item["action"] != "CONFLICT":
         fail("--accept-local is valid only for a current conflict: " + rel)
     item["action"] = "ACCEPT"
+    item["applied_text"] = item["live_text"]
 
 print("UPGRADE " + installed_version + " -> " + new_version)
 print("TARGET " + str(target_root))
@@ -489,7 +556,7 @@ for item in plans:
     print("%-8s %-22s %s" % (item["action"], item["policy"], item["path"]))
 
 conflicts = [item for item in plans if item["action"] == "CONFLICT"]
-changes = [item for item in plans if item["action"] in ("CREATE", "REPLACE")]
+changes = [item for item in plans if item["action"] in ("CREATE", "REPLACE", "UPSTREAM", "MERGE")]
 if not args.apply:
     print("PLAN changes=%d conflicts=%d" % (len(changes), len(conflicts)))
     raise SystemExit(0)
@@ -505,7 +572,7 @@ if conflicts:
         "transaction_id": identifier,
         "from_version": installed_version,
         "to_version": new_version,
-        "conflicts": [{key: item[key] for key in ("path", "policy", "base_hash", "live_hash", "new_hash")} for item in conflicts],
+        "conflicts": [{key: item[key] for key in ("path", "policy", "ownership", "conflict_resolution", "base_hash", "live_hash", "new_hash")} for item in conflicts],
     }
     atomic_write(staging / "plan.json", json.dumps(public_plan, ensure_ascii=False, indent=2) + "\n")
     for item in conflicts:
@@ -538,12 +605,14 @@ records = []
 for item in plans:
     live = destination(item["path"])
     existed = live.is_file()
+    changed = item["action"] in ("CREATE", "REPLACE", "UPSTREAM", "MERGE")
     record = {
         "path": item["path"],
         "existed": existed,
-        "changed": item["action"] in ("CREATE", "REPLACE"),
+        "changed": changed,
         "original_hash": item["live_hash"],
-        "applied_hash": item["new_hash"] if item["action"] in ("CREATE", "REPLACE") else item["live_hash"],
+        "applied_hash": digest_text(item["applied_text"]) if changed else item["live_hash"],
+        "resolution": item["action"],
     }
     records.append(record)
     if existed:
@@ -587,6 +656,8 @@ meta = {
     "old_manifest_hash": old_manifest_hash,
     "new_manifest_hash": digest_text(new_manifest_text),
     "accepted_local": sorted(accepted_local),
+    "upstream_resolved": sorted(item["path"] for item in plans if item["action"] == "UPSTREAM"),
+    "merged": sorted(item["path"] for item in plans if item["action"] == "MERGE"),
     "files": records,
 }
 meta_path = root / "transaction.json"
@@ -594,7 +665,7 @@ atomic_write(meta_path, json.dumps(meta, ensure_ascii=False, indent=2) + "\n")
 
 try:
     for item in changes:
-        atomic_write(destination(item["path"]), item["new_text"])
+        atomic_write(destination(item["path"]), item["applied_text"])
     atomic_write(manifest_path, new_manifest_text)
     meta["state"] = "validating"
     atomic_write(meta_path, json.dumps(meta, ensure_ascii=False, indent=2) + "\n")

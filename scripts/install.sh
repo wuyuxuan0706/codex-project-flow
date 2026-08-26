@@ -50,6 +50,8 @@ MANIFEST_REL = ".project-flow/manifest.json"
 BACKUP_ROOT_NAME = ".project-flow-backup"
 VALID_POLICIES = {"seed_once", "merge_manual", "structured_manual", "replace_if_unmodified"}
 VALID_RENDERS = {"project_name", "project_name_json"}
+VALID_OWNERSHIP = {"plugin", "mixed", "project"}
+VALID_CONFLICT_RESOLUTION = {"upstream_wins", "preserve_markdown_sections", "preserve"}
 
 def fail(message, code=3):
     print("ERROR " + message, file=sys.stderr)
@@ -203,6 +205,22 @@ for raw in raw_entries:
         fail("Unsupported policy for " + relative)
     if mode not in VALID_RENDERS:
         fail("Unsupported render mode for " + relative)
+    ownership = raw.get("ownership")
+    resolution = raw.get("conflict_resolution")
+    if ownership not in VALID_OWNERSHIP:
+        fail("Unsupported ownership for " + relative)
+    if resolution not in VALID_CONFLICT_RESOLUTION:
+        fail("Unsupported conflict_resolution for " + relative)
+    if resolution == "upstream_wins" and ownership != "plugin":
+        fail("upstream_wins requires plugin ownership for " + relative)
+    if resolution == "preserve" and ownership != "project":
+        fail("preserve requires project ownership for " + relative)
+    if resolution == "preserve_markdown_sections":
+        sections = raw.get("preserve_sections")
+        if ownership != "mixed" or not isinstance(sections, list) or not sections:
+            fail("preserve_markdown_sections requires mixed ownership and preserve_sections for " + relative)
+    elif "preserve_sections" in raw:
+        fail("preserve_sections is valid only with preserve_markdown_sections for " + relative)
     source = source_path(source_relative)
     source_text = read_normalized(source, source_relative)
     entries.append({
@@ -219,6 +237,16 @@ if "docs/PROJECT_STATE.md" not in seen:
 state_entry = next(item for item in entries if item["path"] == "docs/PROJECT_STATE.md")
 if state_entry["policy"] != "seed_once":
     fail("docs/PROJECT_STATE.md must use seed_once")
+raw_state_entry = next(item for item in raw_entries if item["path"] == "docs/PROJECT_STATE.md")
+if raw_state_entry.get("ownership") != "project" or raw_state_entry.get("conflict_resolution") != "preserve":
+    fail("docs/PROJECT_STATE.md must be project-owned and preserved")
+raw_agents_entry = next(item for item in raw_entries if item["path"] == "AGENTS.md")
+if (
+    raw_agents_entry.get("ownership") != "mixed" or
+    raw_agents_entry.get("conflict_resolution") != "preserve_markdown_sections" or
+    raw_agents_entry.get("preserve_sections") != ["项目事实"]
+):
+    fail("AGENTS.md must preserve the 项目事实 project-content section")
 
 manifest_path = target_path(MANIFEST_REL, allow_control=True)
 manifest_existed = inspect_target_file(manifest_path, "Manifest")

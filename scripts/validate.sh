@@ -48,6 +48,7 @@ for required in \
     ".agents/prompts/00_project_hub.md" \
     ".agents/prompts/08_result_handoff.md" \
     ".agents/prompts/09_execution_handoff.md" \
+    ".agents/prompts/10_upgrade_coordination.md" \
     ".agents/skills/project-workflow-manager/SKILL.md" \
     ".agents/skills/project-workflow-manager/agents/openai.yaml" \
     ".agents/snippets/AGENTS.integration.md" \
@@ -59,6 +60,7 @@ do
 done
 if [ "$allow_placeholders" -eq 1 ]; then
     require_file "README.md"
+    require_file "docs/TEST_CASES.md"
     require_file "VERSION"
     require_file "templates/PROJECT_STATE.md"
     require_file ".codex-plugin/plugin.json"
@@ -66,6 +68,13 @@ if [ "$allow_placeholders" -eq 1 ]; then
     require_file "migrations/0.2.0-to-0.3.0.json"
     require_file "migrations/0.2.0-to-0.3.1.json"
     require_file "migrations/0.3.0-to-0.3.1.json"
+    require_file "migrations/0.2.0-to-0.4.0.json"
+    require_file "migrations/0.3.0-to-0.4.0.json"
+    require_file "migrations/0.3.1-to-0.4.0.json"
+    require_file "migrations/0.2.0-to-0.4.1.json"
+    require_file "migrations/0.3.0-to-0.4.1.json"
+    require_file "migrations/0.3.1-to-0.4.1.json"
+    require_file "migrations/0.4.0-to-0.4.1.json"
     require_file "baselines/0.2.0/AGENTS.md"
     require_file "baselines/0.3.0/AGENTS.md"
     require_file "baselines/0.3.0/.agents/workflow.json"
@@ -78,6 +87,29 @@ if [ "$allow_placeholders" -eq 1 ]; then
     require_file "baselines/0.3.0/docs/DEVELOPMENT_SOP.md"
     require_file "baselines/0.3.0/docs/PROJECT_STATE.md"
     require_file "baselines/0.3.0/docs/WORKFLOW_GUIDE.md"
+    require_file "baselines/0.3.1/AGENTS.md"
+    require_file "baselines/0.3.1/.agents/workflow.json"
+    require_file "baselines/0.3.1/.agents/prompts/00_project_hub.md"
+    require_file "baselines/0.3.1/.agents/prompts/08_result_handoff.md"
+    require_file "baselines/0.3.1/.agents/prompts/09_execution_handoff.md"
+    require_file "baselines/0.3.1/.agents/skills/project-workflow-manager/SKILL.md"
+    require_file "baselines/0.3.1/.agents/skills/project-workflow-manager/agents/openai.yaml"
+    require_file "baselines/0.3.1/.agents/snippets/AGENTS.integration.md"
+    require_file "baselines/0.3.1/docs/DEVELOPMENT_SOP.md"
+    require_file "baselines/0.3.1/docs/PROJECT_STATE.md"
+    require_file "baselines/0.3.1/docs/WORKFLOW_GUIDE.md"
+    require_file "baselines/0.4.0/AGENTS.md"
+    require_file "baselines/0.4.0/.agents/workflow.json"
+    require_file "baselines/0.4.0/.agents/prompts/00_project_hub.md"
+    require_file "baselines/0.4.0/.agents/prompts/08_result_handoff.md"
+    require_file "baselines/0.4.0/.agents/prompts/09_execution_handoff.md"
+    require_file "baselines/0.4.0/.agents/prompts/10_upgrade_coordination.md"
+    require_file "baselines/0.4.0/.agents/skills/project-workflow-manager/SKILL.md"
+    require_file "baselines/0.4.0/.agents/skills/project-workflow-manager/agents/openai.yaml"
+    require_file "baselines/0.4.0/.agents/snippets/AGENTS.integration.md"
+    require_file "baselines/0.4.0/docs/DEVELOPMENT_SOP.md"
+    require_file "baselines/0.4.0/docs/PROJECT_STATE.md"
+    require_file "baselines/0.4.0/docs/WORKFLOW_GUIDE.md"
     require_file "scripts/upgrade.sh"
     require_file "scripts/upgrade.ps1"
     require_file "skills/bootstrap-project-flow/SKILL.md"
@@ -87,10 +119,38 @@ if [ "$allow_placeholders" -eq 1 ]; then
     require_file "skills/upgrade-project-flow/references/upgrade-contract.md"
 fi
 
-for prefix in 00 08 09; do
+for prefix in 00 08 09 10; do
     count=$(find "$target_root/.agents/prompts" -maxdepth 1 -type f -name "${prefix}_*.md" 2>/dev/null | wc -l | tr -d ' ')
     [ "$count" -eq 1 ] || error "Expected exactly one ${prefix}_*.md prompt."
 done
+successor_key_format='[codex-project-flow:execution:v2] projectId=<exactProjectId>; hubThreadId=<exactHubThreadId>; predecessorThreadId=<exactPredecessorThreadId>; generation=<positiveInteger>; workflowVersion=<exactWorkflowVersion>; upgradeTransaction=<exactUpgradeTransaction>'
+task_handshake_format='[codex-project-flow:handshake:v1] projectId=<exactProjectId>; hubThreadId=<exactHubThreadId>; workflowVersion=<exactWorkflowVersion>; upgradeTransaction=<exactUpgradeTransaction>; generation=<positiveInteger>'
+hub_handshake_format='[codex-project-flow:hub-handshake:v1] projectId=<exactProjectId>; hubThreadId=<exactHubThreadId>; workflowVersion=<exactWorkflowVersion>; upgradeTransaction=<exactUpgradeTransaction>'
+for upgrade_identity_path in \
+    ".agents/workflow.json" \
+    ".agents/prompts/00_project_hub.md" \
+    ".agents/prompts/09_execution_handoff.md" \
+    ".agents/prompts/10_upgrade_coordination.md"
+do
+    [ ! -f "$target_root/$upgrade_identity_path" ] ||
+        grep -Fq "$successor_key_format" "$target_root/$upgrade_identity_path" ||
+        error "Missing the complete v2 upgrade successor key format in $upgrade_identity_path"
+done
+upgrade_prompt="$target_root/.agents/prompts/10_upgrade_coordination.md"
+if [ -f "$upgrade_prompt" ]; then
+    for required_upgrade_text in \
+        "$task_handshake_format" \
+        "$hub_handshake_format" \
+        '升级事务屏障' \
+        '用户可见升级执行任务' \
+        '禁止创建任何普通执行任务' \
+        '保持屏障' \
+        '不得静默解除'
+    do
+        grep -Fq "$required_upgrade_text" "$upgrade_prompt" ||
+            error "Upgrade coordination prompt is missing required protocol text: $required_upgrade_text"
+    done
+fi
 rotation_key_format='[codex-project-flow:execution:v1] projectId=<exactProjectId>; hubThreadId=<exactHubThreadId>; predecessorThreadId=<exactPredecessorThreadId>; generation=<positiveInteger>'
 for rotation_identity_path in \
     ".agents/workflow.json" \
@@ -172,6 +232,7 @@ expected = {
     ".agents/prompts/00_project_hub.md": (".agents/prompts/00_project_hub.md", "replace_if_unmodified"),
     ".agents/prompts/08_result_handoff.md": (".agents/prompts/08_result_handoff.md", "replace_if_unmodified"),
     ".agents/prompts/09_execution_handoff.md": (".agents/prompts/09_execution_handoff.md", "replace_if_unmodified"),
+    ".agents/prompts/10_upgrade_coordination.md": (".agents/prompts/10_upgrade_coordination.md", "replace_if_unmodified"),
     ".agents/skills/project-workflow-manager/SKILL.md": (".agents/skills/project-workflow-manager/SKILL.md", "replace_if_unmodified"),
     ".agents/skills/project-workflow-manager/agents/openai.yaml": (".agents/skills/project-workflow-manager/agents/openai.yaml", "replace_if_unmodified"),
     ".agents/snippets/AGENTS.integration.md": (".agents/snippets/AGENTS.integration.md", "replace_if_unmodified"),
@@ -190,7 +251,7 @@ try:
     manifest = load(sys.argv[1])
     workflow = load(sys.argv[2])
     assert isinstance(manifest, dict) and manifest.get("schema_version") == 1
-    assert manifest.get("workflow_version") == "0.3.1"
+    assert manifest.get("workflow_version") == "0.4.1"
     name = manifest.get("project_name")
     assert isinstance(name, str) and name.strip() and not any(ord(ch) < 32 or ord(ch) == 127 for ch in name)
     assert workflow.get("project", {}).get("name") == name
@@ -215,7 +276,7 @@ except Exception as exc:
     raise SystemExit(1)
 PY
     then
-        error ".project-flow/manifest.json does not satisfy the 0.3.1 install contract."
+        error ".project-flow/manifest.json does not satisfy the 0.4.1 install contract."
     fi
 fi
 
@@ -430,6 +491,9 @@ if [ -f "$config" ]; then
                 } else if (context == "/paths/execution_handoff") {
                     if (string_value ~ /[\r\n]/) print "CONFIG_PATH_INVALID:execution_handoff"
                     else print "CONFIG_PATH:execution_handoff:" string_value
+                } else if (context == "/paths/upgrade_coordination") {
+                    if (string_value ~ /[\r\n]/) print "CONFIG_PATH_INVALID:upgrade_coordination"
+                    else print "CONFIG_PATH:upgrade_coordination:" string_value
                 } else if (context == "/work/mode") {
                     print ((string_value == "read_only") ? "WORK_MODE:ok" : "WORK_MODE:other")
                 } else if (context == "/task_policy/max_active_tasks_applies_to") {
@@ -460,6 +524,8 @@ if [ -f "$config" ]; then
                     print ((string_value == "separate") ? "AUTH:push:ok" : "AUTH:push:other")
                 } else if (context == "/authorization/task_rotation") {
                     print ((string_value == "separate") ? "AUTH:task_rotation:ok" : "AUTH:task_rotation:other")
+                } else if (context == "/authorization/upgrade_coordination") {
+                    print ((string_value == "selected_upgrade_authorizes_coordinator_executor_and_required_successors") ? "AUTH_UPGRADE:ok" : "AUTH_UPGRADE:other")
                 } else if (context == "/task_policy/rotation/primary_trigger") {
                     print ((string_value == "milestone_boundary_or_complete_modify_verify_cycle") ? "ROTATION_PRIMARY:ok" : "ROTATION_PRIMARY:other")
                 } else if (context == "/task_policy/rotation/authorization_scope") {
@@ -610,7 +676,7 @@ if [ "$json_valid" -eq 1 ]; then
             error "Installed project.name must be a non-empty rendered string."
     fi
 
-    for role in rules sop project_state execution_handoff; do
+    for role in rules sop project_state execution_handoff upgrade_coordination; do
         if meta_has "CONFIG_PATH_INVALID:$role"; then
             error "paths.$role must be a safe relative path string."
             continue
@@ -629,6 +695,8 @@ if [ "$json_valid" -eq 1 ]; then
     for field in modify check build test documentation_sync commit push task_rotation; do
         meta_has "AUTH:$field:ok" || error "authorization.$field must be separate."
     done
+    meta_has 'AUTH_UPGRADE:ok' ||
+        error "authorization.upgrade_coordination must authorize the coordinator, executor, and required successors."
     meta_has 'MAX_ACTIVE_TASKS:ok' || error "task_policy.max_active_tasks must be the number 5."
     meta_has 'BLOCKED_WAITING:ok' || error "task_policy.blocked_waiting_or_queued_occupies_slot must be true."
     for marker in EXECUTION_TASK_REQUIREMENT SELECTED_ITEM_AUTHORIZATION TASK_MANAGEMENT_FAILURE HIDDEN_SUBAGENTS; do
@@ -685,6 +753,38 @@ if [ "$json_valid" -eq 1 ]; then
     for field in project_hub_role project_hub_execution_fallback non_conflicting_operations high_risk_operations external_operations; do
         meta_has "EXECUTION:$field:ok" || error "execution_policy.$field has an unsupported or missing value."
     done
+    for required_upgrade_policy in \
+        '"protocol_version": 1' \
+        '"coordinator_role": "temporary_user_visible_coordination_only_task"' \
+        '"coordinator_occupies_active_task_slot": true' \
+        '"executor_requirement": "separate_user_visible_upgrade_execution_task"' \
+        '"task_creation_barrier": "block_new_non_upgrade_execution_tasks_until_reconciled"' \
+        '"active_task_snapshot": "exhaustive_same_project_user_visible_tasks_before_apply"' \
+        '"created_during_barrier": "only_exact_upgrade_executor_or_expected_successor"' \
+        '"file_transaction_binding": "bind_exact_applied_transaction_before_successor_creation"' \
+        '"managed_content_conflicts": "upstream_wins"' \
+        '"protected_project_content": "preserve_agents_project_facts_and_project_state"' \
+        '"unowned_path_collision": "stop_and_report"' \
+        '"successor_creation": "automatic_within_same_authorized_scope"' \
+        '"identity_validation": "exact_first_line_and_exact_managed_thread_id"' \
+        '"finalize_condition": "hub_acknowledged_and_every_snapshot_task_reconciled"' \
+        '"failure_behavior": "keep_barrier_stop_and_report_no_fallback"'
+    do
+        grep -Fq "$required_upgrade_policy" "$config" ||
+            error "upgrade_policy is missing exact contract text: $required_upgrade_policy"
+    done
+    for upgrade_state in \
+        discover_and_snapshot_tasks \
+        activate_creation_barrier \
+        create_upgrade_executor \
+        apply_validate_and_bind_file_transaction \
+        handoff_archive_and_create_successors \
+        collect_exact_version_handshakes \
+        release_barrier
+    do
+        grep -Fq "\"$upgrade_state\"" "$config" ||
+            error "upgrade_policy.state_machine is missing: $upgrade_state"
+    done
     if ! meta_has 'HANDOFF_ARRAY'; then
         error "handoff_policy.only_when must be a JSON array."
     elif meta_has 'HANDOFF_INVALID'; then
@@ -723,6 +823,42 @@ if [ "$allow_placeholders" -eq 1 ]; then
 
         plugin_skills=$(sed -n 's/^[[:space:]]*"skills"[[:space:]]*:[[:space:]]*"\([^"]*\)"[[:space:]]*,\{0,1\}[[:space:]]*$/\1/p' "$plugin_manifest" | head -n 1)
         [ "$plugin_skills" = "./skills/" ] || error "Plugin manifest skills must be ./skills/."
+    fi
+
+    managed_file="$target_root/managed-files.json"
+    if [ -f "$managed_file" ]; then
+        managed_python_cmd=${PYTHON:-python3}
+        command -v "$managed_python_cmd" >/dev/null 2>&1 || error "$managed_python_cmd is required to validate managed-files.json."
+        "$managed_python_cmd" - "$managed_file" "$template_version" <<'PY' || error "managed-files.json ownership contract is invalid."
+import json
+from pathlib import Path
+import sys
+
+managed = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8-sig"))
+assert managed.get("schema_version") == 1
+assert managed.get("workflow_version") == sys.argv[2]
+entries = managed.get("files")
+assert isinstance(entries, list) and entries
+for entry in entries:
+    ownership = entry.get("ownership")
+    resolution = entry.get("conflict_resolution")
+    assert ownership in {"plugin", "mixed", "project"}
+    assert resolution in {"upstream_wins", "preserve_markdown_sections", "preserve"}
+    assert resolution != "upstream_wins" or ownership == "plugin"
+    assert resolution != "preserve" or ownership == "project"
+    assert resolution != "preserve_markdown_sections" or (
+        ownership == "mixed" and isinstance(entry.get("preserve_sections"), list) and entry["preserve_sections"]
+    )
+agents = [entry for entry in entries if entry.get("path") == "AGENTS.md"]
+assert len(agents) == 1
+assert agents[0].get("conflict_resolution") == "preserve_markdown_sections"
+assert agents[0].get("preserve_sections") == ["项目事实"]
+state = [entry for entry in entries if entry.get("path") == "docs/PROJECT_STATE.md"]
+assert len(state) == 1
+assert state[0].get("ownership") == "project"
+assert state[0].get("conflict_resolution") == "preserve"
+assert state[0].get("policy") == "seed_once"
+PY
     fi
 
     bootstrap_skill="$target_root/skills/bootstrap-project-flow/SKILL.md"
@@ -831,8 +967,26 @@ if [ "$allow_placeholders" -eq 1 ]; then
             error "Upgrade Skill must require explicit 0.2.0 legacy adoption."
         grep -Fq -- '--accept-local' "$upgrade_skill" ||
             error "Upgrade Skill must expose explicit per-path local conflict acceptance."
+        for required_ownership_text in upstream_wins preserve_markdown_sections PROJECT_STATE.md; do
+            grep -Fq "$required_ownership_text" "$upgrade_skill" ||
+                error "Upgrade Skill is missing managed-content ownership text: $required_ownership_text"
+        done
         grep -Eiq 'default.*(read-only|plan)|default to a read-only plan' "$upgrade_skill" ||
             error "Upgrade Skill must make read-only planning the default."
+        for required_task_aware_text in \
+            create_thread \
+            send_message_to_thread \
+            wait_threads \
+            "$successor_key_format" \
+            "$task_handshake_format" \
+            "$hub_handshake_format" \
+            'creation barrier' \
+            'active-task snapshot' \
+            'Never release optimistically'
+        do
+            grep -Fq "$required_task_aware_text" "$upgrade_skill" ||
+                error "Upgrade Skill is missing task-aware coordination text: $required_task_aware_text"
+        done
     fi
 
     upgrade_openai_yaml="$target_root/skills/upgrade-project-flow/agents/openai.yaml"

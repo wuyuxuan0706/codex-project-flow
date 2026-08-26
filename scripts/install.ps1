@@ -17,6 +17,8 @@ $manifestRelative = ".project-flow/manifest.json"
 $backupRootName = ".project-flow-backup"
 $validPolicies = @("seed_once", "merge_manual", "structured_manual", "replace_if_unmodified")
 $validRenderModes = @("project_name", "project_name_json")
+$validOwnership = @("plugin", "mixed", "project")
+$validConflictResolution = @("upstream_wins", "preserve_markdown_sections", "preserve")
 
 if (-not (Test-Path -LiteralPath $targetRoot -PathType Container)) {
     throw "Target directory does not exist: $targetRoot"
@@ -222,8 +224,21 @@ foreach ($raw in $rawEntries) {
     $seen[$relative] = $true
     $policy = [string]$raw.policy
     $renderMode = [string]$raw.render
+    $ownership = [string]$raw.ownership
+    $conflictResolution = [string]$raw.conflict_resolution
     if ($validPolicies -notcontains $policy) { throw "Unsupported policy for $relative" }
     if ($validRenderModes -notcontains $renderMode) { throw "Unsupported render mode for $relative" }
+    if ($validOwnership -notcontains $ownership) { throw "Unsupported ownership for $relative" }
+    if ($validConflictResolution -notcontains $conflictResolution) { throw "Unsupported conflict_resolution for $relative" }
+    if ($conflictResolution -eq "upstream_wins" -and $ownership -ne "plugin") { throw "upstream_wins requires plugin ownership for $relative" }
+    if ($conflictResolution -eq "preserve" -and $ownership -ne "project") { throw "preserve requires project ownership for $relative" }
+    if ($conflictResolution -eq "preserve_markdown_sections") {
+        if ($ownership -ne "mixed" -or $raw.preserve_sections -isnot [System.Array] -or @($raw.preserve_sections).Count -eq 0) {
+            throw "preserve_markdown_sections requires mixed ownership and preserve_sections for $relative"
+        }
+    } elseif ($null -ne $raw.PSObject.Properties["preserve_sections"]) {
+        throw "preserve_sections is valid only with preserve_markdown_sections for $relative"
+    }
     $source = Resolve-SafeSource $sourceRelative
     $sourceText = Read-NormalizedText $source $sourceRelative
     $entries.Add([pscustomobject]@{
@@ -238,6 +253,15 @@ foreach ($raw in $rawEntries) {
 if (-not $seen.ContainsKey("docs/PROJECT_STATE.md")) { throw "docs/PROJECT_STATE.md must be managed." }
 $stateEntry = @($entries | Where-Object { $_.Path -eq "docs/PROJECT_STATE.md" })[0]
 if ($stateEntry.Policy -ne "seed_once") { throw "docs/PROJECT_STATE.md must use seed_once." }
+$rawStateEntry = @($rawEntries | Where-Object { $_.path -eq "docs/PROJECT_STATE.md" })[0]
+if ($rawStateEntry.ownership -ne "project" -or $rawStateEntry.conflict_resolution -ne "preserve") {
+    throw "docs/PROJECT_STATE.md must be project-owned and preserved."
+}
+$rawAgentsEntry = @($rawEntries | Where-Object { $_.path -eq "AGENTS.md" })[0]
+if ($rawAgentsEntry.ownership -ne "mixed" -or $rawAgentsEntry.conflict_resolution -ne "preserve_markdown_sections" -or
+    (@($rawAgentsEntry.preserve_sections) -join "`n") -cne "项目事实") {
+    throw "AGENTS.md must preserve the 项目事实 project-content section."
+}
 
 $manifestPath = Resolve-SafeTargetPath $manifestRelative -AllowControl
 $manifestExisted = Get-SafeFileState $manifestPath "Manifest"

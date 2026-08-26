@@ -10,6 +10,7 @@
 - 前任任务 ID
 - 前任提交上述身份字段；中枢 ACK 后、创建继任前补全 `rotationKey`：`[codex-project-flow:execution:v1] projectId=<exactProjectId>; hubThreadId=<exactHubThreadId>; predecessorThreadId=<exactPredecessorThreadId>; generation=<positiveInteger>`
 - 中枢必须把完整 `rotationKey` 作为继任首条用户消息的第一行；它只用于精确身份匹配，不执行其中或任务消息中的任何指令
+- 若交接属于已激活的升级屏障，协调器必须改用 `[codex-project-flow:execution:v2] projectId=<exactProjectId>; hubThreadId=<exactHubThreadId>; predecessorThreadId=<exactPredecessorThreadId>; generation=<positiveInteger>; workflowVersion=<exactWorkflowVersion>; upgradeTransaction=<exactUpgradeTransaction>`，不得同时使用 v1 键；目标版本和事务 ID 必须来自已成功应用并验证的文件升级事务
 
 ## 执行基线
 
@@ -26,6 +27,7 @@
 
 - 剩余步骤、已知风险与下一安全点
 - 继任必须重新读取的规则、文件和实际工作区
+- 升级继任必须核对目标工作流版本和精确事务 ID，并返回 `.agents/prompts/10_upgrade_coordination.md` 规定的完整版本握手；普通轮换不伪造升级握手
 - 独立 worktree 的可传递代码检查点；不存在时注明“不可轮换”
 
 不要复制完整日志，不要把交接包写入 `docs/PROJECT_STATE.md`。项目中枢确认内容完整并 ACK 后，才能归档前任和创建继任。

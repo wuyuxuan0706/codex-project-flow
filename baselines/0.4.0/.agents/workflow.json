@@ -1,0 +1,114 @@
+{
+  "schema_version": 2,
+  "project": {
+    "name": "<PROJECT_NAME>"
+  },
+  "paths": {
+    "rules": "AGENTS.md",
+    "sop": "docs/DEVELOPMENT_SOP.md",
+    "project_state": "docs/PROJECT_STATE.md",
+    "execution_handoff": ".agents/prompts/09_execution_handoff.md",
+    "upgrade_coordination": ".agents/prompts/10_upgrade_coordination.md"
+  },
+  "required_context": [
+    "AGENTS.md",
+    "docs/DEVELOPMENT_SOP.md"
+  ],
+  "work": {
+    "mode": "read_only"
+  },
+  "authorization": {
+    "modify": "separate",
+    "check": "separate",
+    "build": "separate",
+    "test": "separate",
+    "documentation_sync": "separate",
+    "commit": "separate",
+    "push": "separate",
+    "task_rotation": "separate",
+    "upgrade_coordination": "selected_upgrade_authorizes_coordinator_executor_and_required_successors"
+  },
+  "task_policy": {
+    "max_active_tasks": 5,
+    "max_active_tasks_applies_to": "subsequent_user_visible_execution_tasks",
+    "project_hub_task_lifecycle": "persistent",
+    "project_hub_occupies_active_task_slot": false,
+    "blocked_waiting_or_queued_occupies_slot": true,
+    "execution_task_requirement": "user_visible_active_task_required",
+    "selected_item_authorization": "authorize_creation_of_corresponding_execution_task",
+    "task_management_failure": "stop_and_report_no_hub_fallback",
+    "hidden_subagents": "must_not_substitute_user_visible_execution_tasks",
+    "rotation": {
+      "primary_trigger": "milestone_boundary_or_complete_modify_verify_cycle",
+      "review_after_substantive_turns": 6,
+      "rotate_no_later_than_substantive_turns": 10,
+      "additional_triggers": [
+        "context_pressure",
+        "user_request"
+      ],
+      "authorization_scope": "same_already_authorized_scope_only",
+      "change_behavior": "return_to_work",
+      "state_machine": [
+        "prepare_handoff_package",
+        "project_hub_acknowledges_complete_handoff",
+        "archive_predecessor",
+        "create_successor",
+        "successor_rechecks_rules_and_workspace"
+      ],
+      "create_failure_without_id": "restore_predecessor",
+      "queued_client_thread_id": "occupies_active_task_slot_and_do_not_retry",
+      "successor_identity": "exact_rotation_key_v1_in_first_user_message",
+      "queued_recovery": "exhaustive_same_project_discovery_and_exact_rotation_key_match",
+      "rotation_key_format": "[codex-project-flow:execution:v1] projectId=<exactProjectId>; hubThreadId=<exactHubThreadId>; predecessorThreadId=<exactPredecessorThreadId>; generation=<positiveInteger>",
+      "independent_worktree_requirement": "authorized_transferable_code_checkpoint"
+    },
+    "return_to_work_on_change": [
+      "requirements",
+      "scope",
+      "interface",
+      "protocol",
+      "environment",
+      "acceptance_criteria"
+    ]
+  },
+  "execution_policy": {
+    "project_hub_role": "analyze_clarify_design_number_create_wait_coordinate_and_summarize_only",
+    "project_hub_execution_fallback": "forbidden",
+    "non_conflicting_operations": "parallel_allowed",
+    "high_risk_operations": "serial",
+    "external_operations": "serial"
+  },
+  "upgrade_policy": {
+    "protocol_version": 1,
+    "coordinator_role": "temporary_user_visible_coordination_only_task",
+    "coordinator_occupies_active_task_slot": true,
+    "executor_requirement": "separate_user_visible_upgrade_execution_task",
+    "task_creation_barrier": "block_new_non_upgrade_execution_tasks_until_reconciled",
+    "active_task_snapshot": "exhaustive_same_project_user_visible_tasks_before_apply",
+    "created_during_barrier": "only_exact_upgrade_executor_or_expected_successor",
+    "file_transaction_binding": "bind_exact_applied_transaction_before_successor_creation",
+    "successor_creation": "automatic_within_same_authorized_scope",
+    "successor_key_format": "[codex-project-flow:execution:v2] projectId=<exactProjectId>; hubThreadId=<exactHubThreadId>; predecessorThreadId=<exactPredecessorThreadId>; generation=<positiveInteger>; workflowVersion=<exactWorkflowVersion>; upgradeTransaction=<exactUpgradeTransaction>",
+    "task_handshake_format": "[codex-project-flow:handshake:v1] projectId=<exactProjectId>; hubThreadId=<exactHubThreadId>; workflowVersion=<exactWorkflowVersion>; upgradeTransaction=<exactUpgradeTransaction>; generation=<positiveInteger>",
+    "hub_handshake_format": "[codex-project-flow:hub-handshake:v1] projectId=<exactProjectId>; hubThreadId=<exactHubThreadId>; workflowVersion=<exactWorkflowVersion>; upgradeTransaction=<exactUpgradeTransaction>",
+    "identity_validation": "exact_first_line_and_exact_managed_thread_id",
+    "finalize_condition": "hub_acknowledged_and_every_snapshot_task_reconciled",
+    "failure_behavior": "keep_barrier_stop_and_report_no_fallback",
+    "state_machine": [
+      "discover_and_snapshot_tasks",
+      "activate_creation_barrier",
+      "create_upgrade_executor",
+      "apply_validate_and_bind_file_transaction",
+      "handoff_archive_and_create_successors",
+      "collect_exact_version_handshakes",
+      "release_barrier"
+    ]
+  },
+  "handoff_policy": {
+    "only_when": [
+      "coordination_required",
+      "user_choice_required",
+      "user_requested"
+    ]
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "from_version": "0.4.0",
+  "to_version": "0.4.1",
+  "baseline_root": "baselines/0.4.0",
+  "managed_files": "managed-files.json",
+  "legacy_adoption_requires_explicit_flag": false,
+  "introduced_files": [],
+  "removed_files": [],
+  "project_state_policy": "seed_once",
+  "automatic_three_way_merge": false
+}

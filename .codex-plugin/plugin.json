@@ -1,7 +1,7 @@
 {
   "name": "codex-project-flow",
-  "version": "0.3.1+codex.20260825065544",
-  "description": "Install and safely upgrade a reusable Codex workflow with one permanent coordination-only project hub and up to five user-visible execution tasks.",
+  "version": "0.4.1+codex.20260826064139",
+  "description": "Install and safely upgrade a reusable Codex workflow with upstream-managed updates, protected project content, task barriers, and version handshakes.",
   "author": {
     "name": "codex-project-flow contributors"
   },
@@ -14,8 +14,8 @@
   "skills": "./skills/",
   "interface": {
     "displayName": "Codex Project Flow",
-    "shortDescription": "Bootstrap, upgrade, and rotate a permanent project workflow.",
-    "longDescription": "Adopts the bootstrap task as a coordination-only permanent project hub, safely upgrades installed workflow files, and coordinates up to five user-visible execution tasks with fail-closed task management.",
+    "shortDescription": "Bootstrap, upgrade, and reconcile a permanent project workflow.",
+    "longDescription": "Adopts a permanent coordination-only project hub, upgrades plugin-owned workflow content in favor of upstream while preserving declared project content, and reconciles active user-visible tasks through an upgrade barrier and exact version handshakes.",
     "developerName": "codex-project-flow contributors",
     "category": "Productivity",
     "capabilities": [
@@ -24,7 +24,7 @@
     ],
     "defaultPrompt": [
       "Use $bootstrap-project-flow in this saved local project to install the workflow and adopt this task as its permanent hub.",
-      "Use $upgrade-project-flow to safely plan or apply an upgrade without overwriting project-owned state."
+      "Use $upgrade-project-flow to apply a task-aware upgrade, prefer upstream for plugin-owned conflicts, preserve project content, and coordinate successors."
     ]
   }
 }

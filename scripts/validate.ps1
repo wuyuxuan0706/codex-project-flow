@@ -61,6 +61,7 @@ $requiredFiles = @(
     ".agents/prompts/00_project_hub.md",
     ".agents/prompts/08_result_handoff.md",
     ".agents/prompts/09_execution_handoff.md",
+    ".agents/prompts/10_upgrade_coordination.md",
     ".agents/skills/project-workflow-manager/SKILL.md",
     ".agents/skills/project-workflow-manager/agents/openai.yaml",
     ".agents/snippets/AGENTS.integration.md",
@@ -71,6 +72,7 @@ $requiredFiles = @(
 if ($AllowPlaceholders) {
     $requiredFiles += @(
         "README.md",
+        "docs/TEST_CASES.md",
         "VERSION",
         "templates/PROJECT_STATE.md",
         ".codex-plugin/plugin.json",
@@ -78,6 +80,13 @@ if ($AllowPlaceholders) {
         "migrations/0.2.0-to-0.3.0.json",
         "migrations/0.2.0-to-0.3.1.json",
         "migrations/0.3.0-to-0.3.1.json",
+        "migrations/0.2.0-to-0.4.0.json",
+        "migrations/0.3.0-to-0.4.0.json",
+        "migrations/0.3.1-to-0.4.0.json",
+        "migrations/0.2.0-to-0.4.1.json",
+        "migrations/0.3.0-to-0.4.1.json",
+        "migrations/0.3.1-to-0.4.1.json",
+        "migrations/0.4.0-to-0.4.1.json",
         "baselines/0.2.0/AGENTS.md",
         "baselines/0.3.0/AGENTS.md",
         "baselines/0.3.0/.agents/workflow.json",
@@ -90,6 +99,29 @@ if ($AllowPlaceholders) {
         "baselines/0.3.0/docs/DEVELOPMENT_SOP.md",
         "baselines/0.3.0/docs/PROJECT_STATE.md",
         "baselines/0.3.0/docs/WORKFLOW_GUIDE.md",
+        "baselines/0.3.1/AGENTS.md",
+        "baselines/0.3.1/.agents/workflow.json",
+        "baselines/0.3.1/.agents/prompts/00_project_hub.md",
+        "baselines/0.3.1/.agents/prompts/08_result_handoff.md",
+        "baselines/0.3.1/.agents/prompts/09_execution_handoff.md",
+        "baselines/0.3.1/.agents/skills/project-workflow-manager/SKILL.md",
+        "baselines/0.3.1/.agents/skills/project-workflow-manager/agents/openai.yaml",
+        "baselines/0.3.1/.agents/snippets/AGENTS.integration.md",
+        "baselines/0.3.1/docs/DEVELOPMENT_SOP.md",
+        "baselines/0.3.1/docs/PROJECT_STATE.md",
+        "baselines/0.3.1/docs/WORKFLOW_GUIDE.md",
+        "baselines/0.4.0/AGENTS.md",
+        "baselines/0.4.0/.agents/workflow.json",
+        "baselines/0.4.0/.agents/prompts/00_project_hub.md",
+        "baselines/0.4.0/.agents/prompts/08_result_handoff.md",
+        "baselines/0.4.0/.agents/prompts/09_execution_handoff.md",
+        "baselines/0.4.0/.agents/prompts/10_upgrade_coordination.md",
+        "baselines/0.4.0/.agents/skills/project-workflow-manager/SKILL.md",
+        "baselines/0.4.0/.agents/skills/project-workflow-manager/agents/openai.yaml",
+        "baselines/0.4.0/.agents/snippets/AGENTS.integration.md",
+        "baselines/0.4.0/docs/DEVELOPMENT_SOP.md",
+        "baselines/0.4.0/docs/PROJECT_STATE.md",
+        "baselines/0.4.0/docs/WORKFLOW_GUIDE.md",
         "scripts/upgrade.sh",
         "scripts/upgrade.ps1",
         "skills/bootstrap-project-flow/SKILL.md",
@@ -107,7 +139,7 @@ foreach ($relative in $requiredFiles) {
 }
 
 $promptsRoot = Join-Path $targetRoot ".agents/prompts"
-foreach ($prefix in @("00", "08", "09")) {
+foreach ($prefix in @("00", "08", "09", "10")) {
     $matches = if (Test-Path -LiteralPath $promptsRoot -PathType Container) {
         @(Get-ChildItem -LiteralPath $promptsRoot -File -Filter "${prefix}_*.md")
     } else {
@@ -115,6 +147,38 @@ foreach ($prefix in @("00", "08", "09")) {
     }
     if ($matches.Count -ne 1) {
         Add-Error "Expected exactly one ${prefix}_*.md prompt."
+    }
+}
+$successorKeyFormat = '[codex-project-flow:execution:v2] projectId=<exactProjectId>; hubThreadId=<exactHubThreadId>; predecessorThreadId=<exactPredecessorThreadId>; generation=<positiveInteger>; workflowVersion=<exactWorkflowVersion>; upgradeTransaction=<exactUpgradeTransaction>'
+$taskHandshakeFormat = '[codex-project-flow:handshake:v1] projectId=<exactProjectId>; hubThreadId=<exactHubThreadId>; workflowVersion=<exactWorkflowVersion>; upgradeTransaction=<exactUpgradeTransaction>; generation=<positiveInteger>'
+$hubHandshakeFormat = '[codex-project-flow:hub-handshake:v1] projectId=<exactProjectId>; hubThreadId=<exactHubThreadId>; workflowVersion=<exactWorkflowVersion>; upgradeTransaction=<exactUpgradeTransaction>'
+foreach ($upgradeIdentityRelative in @(
+    ".agents/workflow.json",
+    ".agents/prompts/00_project_hub.md",
+    ".agents/prompts/09_execution_handoff.md",
+    ".agents/prompts/10_upgrade_coordination.md"
+)) {
+    $upgradeIdentityPath = Join-Path $targetRoot $upgradeIdentityRelative
+    if ((Test-Path -LiteralPath $upgradeIdentityPath -PathType Leaf) -and
+        -not [System.IO.File]::ReadAllText($upgradeIdentityPath).Contains($successorKeyFormat)) {
+        Add-Error "Missing the complete v2 upgrade successor key format in $upgradeIdentityRelative"
+    }
+}
+$upgradePromptPath = Join-Path $targetRoot ".agents/prompts/10_upgrade_coordination.md"
+if (Test-Path -LiteralPath $upgradePromptPath -PathType Leaf) {
+    $upgradePromptText = [System.IO.File]::ReadAllText($upgradePromptPath)
+    foreach ($requiredUpgradeText in @(
+        $taskHandshakeFormat,
+        $hubHandshakeFormat,
+        "升级事务屏障",
+        "用户可见升级执行任务",
+        "禁止创建任何普通执行任务",
+        "保持屏障",
+        "不得静默解除"
+    )) {
+        if (-not $upgradePromptText.Contains($requiredUpgradeText)) {
+            Add-Error "Upgrade coordination prompt is missing required protocol text: $requiredUpgradeText"
+        }
     }
 }
 $rotationKeyFormat = '[codex-project-flow:execution:v1] projectId=<exactProjectId>; hubThreadId=<exactHubThreadId>; predecessorThreadId=<exactPredecessorThreadId>; generation=<positiveInteger>'
@@ -205,6 +269,7 @@ if (Test-Path -LiteralPath $installManifestPath) {
                 ".agents/prompts/00_project_hub.md" = @(".agents/prompts/00_project_hub.md", "replace_if_unmodified")
                 ".agents/prompts/08_result_handoff.md" = @(".agents/prompts/08_result_handoff.md", "replace_if_unmodified")
                 ".agents/prompts/09_execution_handoff.md" = @(".agents/prompts/09_execution_handoff.md", "replace_if_unmodified")
+                ".agents/prompts/10_upgrade_coordination.md" = @(".agents/prompts/10_upgrade_coordination.md", "replace_if_unmodified")
                 ".agents/skills/project-workflow-manager/SKILL.md" = @(".agents/skills/project-workflow-manager/SKILL.md", "replace_if_unmodified")
                 ".agents/skills/project-workflow-manager/agents/openai.yaml" = @(".agents/skills/project-workflow-manager/agents/openai.yaml", "replace_if_unmodified")
                 ".agents/snippets/AGENTS.integration.md" = @(".agents/snippets/AGENTS.integration.md", "replace_if_unmodified")
@@ -212,7 +277,7 @@ if (Test-Path -LiteralPath $installManifestPath) {
                 "docs/PROJECT_STATE.md" = @("templates/PROJECT_STATE.md", "seed_once")
                 "docs/WORKFLOW_GUIDE.md" = @("docs/WORKFLOW_GUIDE.md", "replace_if_unmodified")
             }
-            if ($installManifest.schema_version -ne 1 -or [string]$installManifest.workflow_version -cne "0.3.1") {
+            if ($installManifest.schema_version -ne 1 -or [string]$installManifest.workflow_version -cne "0.4.1") {
                 throw "unsupported schema or workflow version"
             }
             $manifestProjectName = [string]$installManifest.project_name
@@ -254,7 +319,7 @@ if (Test-Path -LiteralPath $installManifestPath) {
                 }
             }
         } catch {
-            Add-Error ".project-flow/manifest.json does not satisfy the 0.3.1 install contract: $($_.Exception.Message)"
+            Add-Error ".project-flow/manifest.json does not satisfy the 0.4.1 install contract: $($_.Exception.Message)"
         }
     }
 }
@@ -333,7 +398,7 @@ if ($configParsed -and $configIsObject) {
     if (-not $pathsProperty -or $config.paths -isnot [pscustomobject]) {
         Add-Error "paths must be a JSON object."
     } else {
-        foreach ($role in @("rules", "sop", "project_state", "execution_handoff")) {
+        foreach ($role in @("rules", "sop", "project_state", "execution_handoff", "upgrade_coordination")) {
             $roleProperty = $config.paths.PSObject.Properties[$role]
             if (-not $roleProperty -or $roleProperty.Value -isnot [string]) {
                 Add-Error "paths.$role must be a relative path string."
@@ -367,6 +432,11 @@ if ($configParsed -and $configIsObject) {
             ) {
                 Add-Error "authorization.$field must be separate."
             }
+        }
+        $upgradeAuthorization = $config.authorization.PSObject.Properties["upgrade_coordination"]
+        if (-not $upgradeAuthorization -or $upgradeAuthorization.Value -isnot [string] -or
+            $upgradeAuthorization.Value -cne "selected_upgrade_authorizes_coordinator_executor_and_required_successors") {
+            Add-Error "authorization.upgrade_coordination must authorize the coordinator, executor, and required successors."
         }
     }
 
@@ -509,6 +579,58 @@ if ($configParsed -and $configIsObject) {
         }
     }
 
+    $upgradePolicyProperty = $config.PSObject.Properties["upgrade_policy"]
+    if (-not $upgradePolicyProperty -or $config.upgrade_policy -isnot [pscustomobject]) {
+        Add-Error "upgrade_policy must be a JSON object."
+    } else {
+        $upgradePolicy = $config.upgrade_policy
+        if ($upgradePolicy.protocol_version -isnot [ValueType] -or [double]$upgradePolicy.protocol_version -ne 1) {
+            Add-Error "upgrade_policy.protocol_version must be 1."
+        }
+        if ($upgradePolicy.coordinator_occupies_active_task_slot -isnot [bool] -or
+            -not $upgradePolicy.coordinator_occupies_active_task_slot) {
+            Add-Error "upgrade_policy.coordinator_occupies_active_task_slot must be true."
+        }
+        $expectedUpgradeStrings = @{
+            coordinator_role = "temporary_user_visible_coordination_only_task"
+            executor_requirement = "separate_user_visible_upgrade_execution_task"
+            task_creation_barrier = "block_new_non_upgrade_execution_tasks_until_reconciled"
+            active_task_snapshot = "exhaustive_same_project_user_visible_tasks_before_apply"
+            created_during_barrier = "only_exact_upgrade_executor_or_expected_successor"
+            file_transaction_binding = "bind_exact_applied_transaction_before_successor_creation"
+            managed_content_conflicts = "upstream_wins"
+            protected_project_content = "preserve_agents_project_facts_and_project_state"
+            unowned_path_collision = "stop_and_report"
+            successor_creation = "automatic_within_same_authorized_scope"
+            successor_key_format = $successorKeyFormat
+            task_handshake_format = $taskHandshakeFormat
+            hub_handshake_format = $hubHandshakeFormat
+            identity_validation = "exact_first_line_and_exact_managed_thread_id"
+            finalize_condition = "hub_acknowledged_and_every_snapshot_task_reconciled"
+            failure_behavior = "keep_barrier_stop_and_report_no_fallback"
+        }
+        foreach ($entry in $expectedUpgradeStrings.GetEnumerator()) {
+            $property = $upgradePolicy.PSObject.Properties[$entry.Key]
+            if (-not $property -or $property.Value -isnot [string] -or $property.Value -cne $entry.Value) {
+                Add-Error "upgrade_policy.$($entry.Key) must be $($entry.Value)."
+            }
+        }
+        $expectedUpgradeStates = @(
+            "discover_and_snapshot_tasks",
+            "activate_creation_barrier",
+            "create_upgrade_executor",
+            "apply_validate_and_bind_file_transaction",
+            "handoff_archive_and_create_successors",
+            "collect_exact_version_handshakes",
+            "release_barrier"
+        )
+        if ($upgradePolicy.state_machine -isnot [System.Array] -or
+            (@($upgradePolicy.state_machine | ForEach-Object { [string]$_ }) -join "`n") -cne
+                ($expectedUpgradeStates -join "`n")) {
+            Add-Error "upgrade_policy.state_machine must contain the exact ordered seven-state sequence."
+        }
+    }
+
     $handoffPolicyProperty = $config.PSObject.Properties["handoff_policy"]
     if (-not $handoffPolicyProperty -or $config.handoff_policy -isnot [pscustomobject]) {
         Add-Error "handoff_policy must be a JSON object."
@@ -569,6 +691,42 @@ if ($AllowPlaceholders) {
             }
         } catch {
             Add-Error "Invalid JSON in .codex-plugin/plugin.json: $($_.Exception.Message)"
+        }
+    }
+
+    $managedPath = Join-Path $targetRoot "managed-files.json"
+    if (Test-Path -LiteralPath $managedPath -PathType Leaf) {
+        try {
+            $managed = Get-Content -Raw -Encoding UTF8 -LiteralPath $managedPath | ConvertFrom-Json
+            if ($managed.schema_version -ne 1 -or [string]$managed.workflow_version -cne $templateVersion) {
+                throw "schema or workflow_version mismatch"
+            }
+            foreach ($entry in @($managed.files)) {
+                $ownership = [string]$entry.ownership
+                $resolution = [string]$entry.conflict_resolution
+                if ($ownership -notin @("plugin", "mixed", "project")) { throw "invalid ownership for $($entry.path)" }
+                if ($resolution -notin @("upstream_wins", "preserve_markdown_sections", "preserve")) {
+                    throw "invalid conflict_resolution for $($entry.path)"
+                }
+                if ($resolution -eq "upstream_wins" -and $ownership -ne "plugin") { throw "upstream_wins ownership mismatch for $($entry.path)" }
+                if ($resolution -eq "preserve" -and $ownership -ne "project") { throw "preserve ownership mismatch for $($entry.path)" }
+                if ($resolution -eq "preserve_markdown_sections" -and
+                    ($ownership -ne "mixed" -or @($entry.preserve_sections).Count -eq 0)) {
+                    throw "protected section contract mismatch for $($entry.path)"
+                }
+            }
+            $agentsEntry = @($managed.files | Where-Object { $_.path -ceq "AGENTS.md" })
+            if ($agentsEntry.Count -ne 1 -or $agentsEntry[0].conflict_resolution -cne "preserve_markdown_sections" -or
+                (@($agentsEntry[0].preserve_sections) -join "`n") -cne "项目事实") {
+                throw "AGENTS.md project-content protection is missing"
+            }
+            $stateEntry = @($managed.files | Where-Object { $_.path -ceq "docs/PROJECT_STATE.md" })
+            if ($stateEntry.Count -ne 1 -or $stateEntry[0].ownership -cne "project" -or
+                $stateEntry[0].conflict_resolution -cne "preserve" -or $stateEntry[0].policy -cne "seed_once") {
+                throw "PROJECT_STATE project-content protection is missing"
+            }
+        } catch {
+            Add-Error "managed-files.json ownership contract is invalid: $($_.Exception.Message)"
         }
     }
 
@@ -756,8 +914,28 @@ if ($AllowPlaceholders) {
         if ($upgradeSkillText -notmatch [regex]::Escape('--accept-local')) {
             Add-Error "Upgrade Skill must expose explicit per-path local conflict acceptance."
         }
+        foreach ($requiredOwnershipText in @("upstream_wins", "preserve_markdown_sections", "PROJECT_STATE.md")) {
+            if (-not $upgradeSkillText.Contains($requiredOwnershipText)) {
+                Add-Error "Upgrade Skill is missing managed-content ownership text: $requiredOwnershipText"
+            }
+        }
         if ($upgradeSkillText -notmatch '(?is)default.{0,40}(?:read-only|plan)') {
             Add-Error "Upgrade Skill must make read-only planning the default."
+        }
+        foreach ($requiredTaskAwareText in @(
+            "create_thread",
+            "send_message_to_thread",
+            "wait_threads",
+            $successorKeyFormat,
+            $taskHandshakeFormat,
+            $hubHandshakeFormat,
+            "creation barrier",
+            "active-task snapshot",
+            "Never release optimistically"
+        )) {
+            if (-not $upgradeSkillText.Contains($requiredTaskAwareText)) {
+                Add-Error "Upgrade Skill is missing task-aware coordination text: $requiredTaskAwareText"
+            }
         }
     }
 

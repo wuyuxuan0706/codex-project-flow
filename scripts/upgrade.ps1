@@ -18,6 +18,8 @@ $targetRoot = [System.IO.Path]::GetFullPath($Target)
 $controlRootName = ".project-flow"
 $manifestRelative = ".project-flow/manifest.json"
 $validPolicies = @("seed_once", "merge_manual", "structured_manual", "replace_if_unmodified")
+$validOwnership = @("plugin", "mixed", "project")
+$validConflictResolution = @("upstream_wins", "preserve_markdown_sections", "preserve")
 
 if ($Apply -and $Plan) { throw "-Apply and -Plan are mutually exclusive." }
 if ($Rollback -and ($Apply -or $Plan)) { throw "-Rollback is mutually exclusive with -Apply and -Plan." }
@@ -200,6 +202,30 @@ function Render-Template([string]$Text, [string]$Mode, [string]$Name) {
     return $Text.Replace("<PROJECT_NAME>", $Name)
 }
 
+function Merge-ProtectedMarkdownSections(
+    [string]$LiveText,
+    [string]$NewText,
+    [object[]]$SectionNames,
+    [string]$RelativePath
+) {
+    $merged = $NewText
+    foreach ($rawName in $SectionNames) {
+        $name = [string]$rawName
+        if ([string]::IsNullOrWhiteSpace($name) -or $name.Contains("`n") -or $name.Contains("`r")) {
+            throw "Invalid protected Markdown section for $RelativePath"
+        }
+        $pattern = "(?ms)^##[ \t]+$([regex]::Escape($name))[ \t]*\n.*?(?=^##[ \t]+|\z)"
+        $liveMatches = [regex]::Matches($LiveText, $pattern)
+        $newMatches = [regex]::Matches($merged, $pattern)
+        if ($liveMatches.Count -ne 1 -or $newMatches.Count -ne 1) {
+            throw "Protected Markdown section '$name' must appear exactly once in local and upstream $RelativePath"
+        }
+        $match = $newMatches[0]
+        $merged = $merged.Remove($match.Index, $match.Length).Insert($match.Index, $liveMatches[0].Value)
+    }
+    return $merged
+}
+
 function Confirm-ProjectName([string]$Name) {
     if ([string]::IsNullOrWhiteSpace($Name)) { throw "Project name must not be empty." }
     foreach ($character in $Name.ToCharArray()) {
@@ -236,11 +262,36 @@ foreach ($entry in $entries) {
     $seen[$relative] = $true
     if ($validPolicies -notcontains [string]$entry.policy) { throw "Unsupported policy for $relative" }
     if (@("project_name", "project_name_json") -notcontains [string]$entry.render) { throw "Unsupported render mode for $relative" }
+    if ($validOwnership -notcontains [string]$entry.ownership) { throw "Unsupported ownership for $relative" }
+    if ($validConflictResolution -notcontains [string]$entry.conflict_resolution) {
+        throw "Unsupported conflict_resolution for $relative"
+    }
+    if ($entry.conflict_resolution -eq "upstream_wins" -and $entry.ownership -ne "plugin") {
+        throw "upstream_wins requires plugin ownership for $relative"
+    }
+    if ($entry.conflict_resolution -eq "preserve" -and $entry.ownership -ne "project") {
+        throw "preserve requires project ownership for $relative"
+    }
+    if ($entry.conflict_resolution -eq "preserve_markdown_sections") {
+        if ($entry.ownership -ne "mixed" -or $entry.preserve_sections -isnot [System.Array] -or @($entry.preserve_sections).Count -eq 0) {
+            throw "preserve_markdown_sections requires mixed ownership and preserve_sections for $relative"
+        }
+    } elseif (Test-Property $entry "preserve_sections") {
+        throw "preserve_sections is valid only with preserve_markdown_sections for $relative"
+    }
     Resolve-SafePluginInput $sourceRelative "managed source" | Out-Null
 }
 if (-not $seen.ContainsKey("docs/PROJECT_STATE.md")) { throw "docs/PROJECT_STATE.md must be managed." }
 $stateEntry = @($entries | Where-Object { $_.path -eq "docs/PROJECT_STATE.md" })[0]
 if ($stateEntry.policy -ne "seed_once") { throw "docs/PROJECT_STATE.md must use seed_once." }
+if ($stateEntry.ownership -ne "project" -or $stateEntry.conflict_resolution -ne "preserve") {
+    throw "docs/PROJECT_STATE.md must be project-owned and preserved."
+}
+$agentsEntry = @($entries | Where-Object { $_.path -eq "AGENTS.md" })[0]
+if ($agentsEntry.ownership -ne "mixed" -or $agentsEntry.conflict_resolution -ne "preserve_markdown_sections" -or
+    (@($agentsEntry.preserve_sections) -join "`n") -cne "项目事实") {
+    throw "AGENTS.md must preserve the 项目事实 project-content section."
+}
 
 $manifestPath = Resolve-SafePath $manifestRelative -AllowControl
 $manifest = $null
@@ -444,8 +495,10 @@ foreach ($entry in $entries) {
     }
     $liveText = if ($liveItem) { Read-NormalizedText $live $relative } else { $null }
     $liveHash = if ($null -ne $liveText) { Get-TextHash $liveText } else { $null }
+    $appliedText = $liveText
     if ($null -eq $liveText) {
         $action = "CREATE"
+        $appliedText = $newText
     } elseif ($null -eq $baseText) {
         $action = if ($liveHash -eq $newHash) { "NOOP" } else { "CONFLICT" }
     } elseif ($entry.policy -eq "seed_once") {
@@ -454,15 +507,25 @@ foreach ($entry in $entries) {
         $action = "NOOP"
     } elseif ($liveHash -eq $baseHash) {
         $action = "REPLACE"
+        $appliedText = $newText
     } elseif ($baseHash -eq $newHash) {
+        $action = "PRESERVE"
+    } elseif ($entry.conflict_resolution -eq "upstream_wins") {
+        $action = "UPSTREAM"
+        $appliedText = $newText
+    } elseif ($entry.conflict_resolution -eq "preserve_markdown_sections") {
+        $action = "MERGE"
+        $appliedText = Merge-ProtectedMarkdownSections $liveText $newText @($entry.preserve_sections) $relative
+    } elseif ($entry.conflict_resolution -eq "preserve") {
         $action = "PRESERVE"
     } else {
         $action = "CONFLICT"
     }
     $plans.Add([pscustomobject]@{
-        Path = $relative; Source = [string]$entry.source; Policy = [string]$entry.policy; Action = $action
+        Path = $relative; Source = [string]$entry.source; Policy = [string]$entry.policy
+        Ownership = [string]$entry.ownership; ConflictResolution = [string]$entry.conflict_resolution; Action = $action
         BaseHash = $baseHash; LiveHash = $liveHash; NewHash = $newHash
-        BaseText = $baseText; LiveText = $liveText; NewText = $newText
+        BaseText = $baseText; LiveText = $liveText; NewText = $newText; AppliedText = $appliedText
     })
 }
 
@@ -476,13 +539,14 @@ foreach ($rawPath in $AcceptLocal) {
     if ($matchingPlans.Count -ne 1) { throw "-AcceptLocal path is not managed: $relative" }
     if ($matchingPlans[0].Action -cne "CONFLICT") { throw "-AcceptLocal is valid only for a current conflict: $relative" }
     $matchingPlans[0].Action = "ACCEPT"
+    $matchingPlans[0].AppliedText = $matchingPlans[0].LiveText
 }
 
 Write-Host "UPGRADE $installedVersion -> $newVersion"
 Write-Host "TARGET $targetRoot"
 foreach ($item in $plans) { Write-Host (("{0,-8} {1,-22} {2}" -f $item.Action, $item.Policy, $item.Path)) }
 $conflicts = @($plans | Where-Object { $_.Action -eq "CONFLICT" })
-$changes = @($plans | Where-Object { $_.Action -eq "CREATE" -or $_.Action -eq "REPLACE" })
+$changes = @($plans | Where-Object { @("CREATE", "REPLACE", "UPSTREAM", "MERGE") -contains $_.Action })
 if (-not $Apply) {
     Write-Host "PLAN changes=$($changes.Count) conflicts=$($conflicts.Count)"
     exit 0
@@ -494,7 +558,7 @@ if ($conflicts.Count -gt 0) {
     if (Test-Path -LiteralPath $staging) { throw "Staging transaction already exists: $identifier" }
     Ensure-SafeDirectory $staging
     $publicConflicts = @($conflicts | ForEach-Object {
-        [pscustomobject]@{ path = $_.Path; policy = $_.Policy; base_hash = $_.BaseHash; live_hash = $_.LiveHash; new_hash = $_.NewHash }
+        [pscustomobject]@{ path = $_.Path; policy = $_.Policy; ownership = $_.Ownership; conflict_resolution = $_.ConflictResolution; base_hash = $_.BaseHash; live_hash = $_.LiveHash; new_hash = $_.NewHash }
     })
     $publicPlan = [ordered]@{ schema_version = 1; transaction_id = $identifier; from_version = $installedVersion; to_version = $newVersion; conflicts = $publicConflicts }
     Write-AtomicText (Join-Path $staging "plan.json") (($publicPlan | ConvertTo-Json -Depth 20) + "`n")
@@ -525,10 +589,11 @@ $records = New-Object System.Collections.Generic.List[object]
 foreach ($item in $plans) {
     $live = Resolve-SafePath $item.Path
     $exists = Test-Path -LiteralPath $live -PathType Leaf
-    $changed = $item.Action -eq "CREATE" -or $item.Action -eq "REPLACE"
+    $changed = @("CREATE", "REPLACE", "UPSTREAM", "MERGE") -contains $item.Action
     $records.Add([pscustomobject]@{
         path = $item.Path; existed = $exists; changed = $changed; original_hash = $item.LiveHash
-        applied_hash = if ($changed) { $item.NewHash } else { $item.LiveHash }
+        applied_hash = if ($changed) { Get-TextHash $item.AppliedText } else { $item.LiveHash }
+        resolution = $item.Action
     })
     if ($exists) {
         $backup = Join-Path $backupRoot ($item.Path.Replace('/', [System.IO.Path]::DirectorySeparatorChar))
@@ -558,13 +623,16 @@ $meta = [ordered]@{
     schema_version = 1; transaction_id = $identifier; target = $targetRoot
     from_version = $installedVersion; to_version = $newVersion; state = "prepared"; created_at_utc = $now
     old_manifest_hash = $oldManifestHash; new_manifest_hash = (Get-TextHash $newManifestText)
-    accepted_local = @($acceptedLocalPaths.Keys | Sort-Object); files = $records.ToArray()
+    accepted_local = @($acceptedLocalPaths.Keys | Sort-Object)
+    upstream_resolved = @($plans | Where-Object { $_.Action -eq "UPSTREAM" } | ForEach-Object { $_.Path } | Sort-Object)
+    merged = @($plans | Where-Object { $_.Action -eq "MERGE" } | ForEach-Object { $_.Path } | Sort-Object)
+    files = $records.ToArray()
 }
 $metaPath = Join-Path $transactionRoot "transaction.json"
 Write-AtomicText $metaPath (($meta | ConvertTo-Json -Depth 20) + "`n")
 
 try {
-    foreach ($item in $changes) { Write-AtomicText (Resolve-SafePath $item.Path) $item.NewText }
+    foreach ($item in $changes) { Write-AtomicText (Resolve-SafePath $item.Path) $item.AppliedText }
     Write-AtomicText $manifestPath $newManifestText
     $writtenManifestHash = Get-FileHashNormalized $manifestPath $manifestRelative
     if ($writtenManifestHash -ne $meta.new_manifest_hash) {
