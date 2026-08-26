@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "from_version": "0.2.0",
+  "to_version": "0.4.2",
+  "baseline_root": "baselines/0.2.0",
+  "managed_files": "managed-files.json",
+  "legacy_adoption_requires_explicit_flag": true,
+  "introduced_files": [
+    ".agents/prompts/09_execution_handoff.md",
+    ".agents/prompts/10_upgrade_coordination.md"
+  ],
+  "removed_files": [],
+  "project_state_policy": "seed_once",
+  "automatic_three_way_merge": false
+}

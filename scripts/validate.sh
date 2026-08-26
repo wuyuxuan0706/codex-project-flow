@@ -75,6 +75,11 @@ if [ "$allow_placeholders" -eq 1 ]; then
     require_file "migrations/0.3.0-to-0.4.1.json"
     require_file "migrations/0.3.1-to-0.4.1.json"
     require_file "migrations/0.4.0-to-0.4.1.json"
+    require_file "migrations/0.2.0-to-0.4.2.json"
+    require_file "migrations/0.3.0-to-0.4.2.json"
+    require_file "migrations/0.3.1-to-0.4.2.json"
+    require_file "migrations/0.4.0-to-0.4.2.json"
+    require_file "migrations/0.4.1-to-0.4.2.json"
     require_file "baselines/0.2.0/AGENTS.md"
     require_file "baselines/0.3.0/AGENTS.md"
     require_file "baselines/0.3.0/.agents/workflow.json"
@@ -110,6 +115,18 @@ if [ "$allow_placeholders" -eq 1 ]; then
     require_file "baselines/0.4.0/docs/DEVELOPMENT_SOP.md"
     require_file "baselines/0.4.0/docs/PROJECT_STATE.md"
     require_file "baselines/0.4.0/docs/WORKFLOW_GUIDE.md"
+    require_file "baselines/0.4.1/AGENTS.md"
+    require_file "baselines/0.4.1/.agents/workflow.json"
+    require_file "baselines/0.4.1/.agents/prompts/00_project_hub.md"
+    require_file "baselines/0.4.1/.agents/prompts/08_result_handoff.md"
+    require_file "baselines/0.4.1/.agents/prompts/09_execution_handoff.md"
+    require_file "baselines/0.4.1/.agents/prompts/10_upgrade_coordination.md"
+    require_file "baselines/0.4.1/.agents/skills/project-workflow-manager/SKILL.md"
+    require_file "baselines/0.4.1/.agents/skills/project-workflow-manager/agents/openai.yaml"
+    require_file "baselines/0.4.1/.agents/snippets/AGENTS.integration.md"
+    require_file "baselines/0.4.1/docs/DEVELOPMENT_SOP.md"
+    require_file "baselines/0.4.1/docs/PROJECT_STATE.md"
+    require_file "baselines/0.4.1/docs/WORKFLOW_GUIDE.md"
     require_file "scripts/upgrade.sh"
     require_file "scripts/upgrade.ps1"
     require_file "skills/bootstrap-project-flow/SKILL.md"
@@ -145,7 +162,11 @@ if [ -f "$upgrade_prompt" ]; then
         '用户可见升级执行任务' \
         '禁止创建任何普通执行任务' \
         '保持屏障' \
-        '不得静默解除'
+        '不得静默解除' \
+        '当前任务所属的一个已保存本地项目' \
+        '原始 `agentMessage`' \
+        '零任务快速路径' \
+        '一次且仅一次补偿继任'
     do
         grep -Fq "$required_upgrade_text" "$upgrade_prompt" ||
             error "Upgrade coordination prompt is missing required protocol text: $required_upgrade_text"
@@ -251,7 +272,7 @@ try:
     manifest = load(sys.argv[1])
     workflow = load(sys.argv[2])
     assert isinstance(manifest, dict) and manifest.get("schema_version") == 1
-    assert manifest.get("workflow_version") == "0.4.1"
+    assert manifest.get("workflow_version") == "0.4.2"
     name = manifest.get("project_name")
     assert isinstance(name, str) and name.strip() and not any(ord(ch) < 32 or ord(ch) == 127 for ch in name)
     assert workflow.get("project", {}).get("name") == name
@@ -276,7 +297,7 @@ except Exception as exc:
     raise SystemExit(1)
 PY
     then
-        error ".project-flow/manifest.json does not satisfy the 0.4.1 install contract."
+        error ".project-flow/manifest.json does not satisfy the 0.4.2 install contract."
     fi
 fi
 
@@ -755,6 +776,9 @@ if [ "$json_valid" -eq 1 ]; then
     done
     for required_upgrade_policy in \
         '"protocol_version": 1' \
+        '"project_scope": "current_saved_local_project_only"' \
+        '"cross_project_behavior": "stop_before_target_read_task_mutation_or_file_mutation"' \
+        '"project_identity_validation": "exact_current_project_id_and_canonical_current_working_directory"' \
         '"coordinator_role": "temporary_user_visible_coordination_only_task"' \
         '"coordinator_occupies_active_task_slot": true' \
         '"executor_requirement": "separate_user_visible_upgrade_execution_task"' \
@@ -767,6 +791,12 @@ if [ "$json_valid" -eq 1 ]; then
         '"unowned_path_collision": "stop_and_report"' \
         '"successor_creation": "automatic_within_same_authorized_scope"' \
         '"identity_validation": "exact_first_line_and_exact_managed_thread_id"' \
+        '"handshake_evidence": "raw_agent_message_first_line_from_exact_thread_only"' \
+        '"handshake_forbidden_sources": "summaries_previews_titles_reasoning_tool_output_prompt_echoes"' \
+        '"empty_snapshot_fast_path": "after_executor_and_hub_handshake_release_without_successor_phase"' \
+        '"empty_successor_followup_limit": 1' \
+        '"compensating_successor_limit": 1' \
+        '"compensating_successor_identity": "same_scope_increment_generation_and_reference_failed_successor"' \
         '"finalize_condition": "hub_acknowledged_and_every_snapshot_task_reconciled"' \
         '"failure_behavior": "keep_barrier_stop_and_report_no_fallback"'
     do
@@ -774,12 +804,15 @@ if [ "$json_valid" -eq 1 ]; then
             error "upgrade_policy is missing exact contract text: $required_upgrade_policy"
     done
     for upgrade_state in \
+        validate_current_project_scope \
         discover_and_snapshot_tasks \
         activate_creation_barrier \
         create_upgrade_executor \
         apply_validate_and_bind_file_transaction \
+        collect_raw_hub_handshake \
+        release_fast_path_when_snapshot_empty \
         handoff_archive_and_create_successors \
-        collect_exact_version_handshakes \
+        collect_raw_successor_handshakes_with_bounded_recovery \
         release_barrier
     do
         grep -Fq "\"$upgrade_state\"" "$config" ||
@@ -982,6 +1015,10 @@ PY
             "$hub_handshake_format" \
             'creation barrier' \
             'active-task snapshot' \
+            'current-project boundary' \
+            'agentMessage.text' \
+            'active-task snapshot is empty' \
+            'compensating successor' \
             'Never release optimistically'
         do
             grep -Fq "$required_task_aware_text" "$upgrade_skill" ||

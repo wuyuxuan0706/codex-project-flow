@@ -19,6 +19,7 @@ existing_target="$test_root/existing-project"
 legacy_target="$test_root/legacy-project"
 versioned_target="$test_root/versioned-project"
 previous_target="$test_root/previous-project"
+latest_previous_target="$test_root/latest-previous-project"
 upgrade_target="$test_root/upgrade-project"
 ownership_target="$test_root/ownership-project"
 conflict_target="$test_root/conflict-project"
@@ -36,6 +37,7 @@ mkdir -p \
     "$legacy_target" \
     "$versioned_target" \
     "$previous_target" \
+    "$latest_previous_target" \
     "$upgrade_target" \
     "$ownership_target" \
     "$conflict_target" \
@@ -73,7 +75,7 @@ def normalized_text(path):
 
 managed = load_json(repo / "managed-files.json")
 manifest = load_json(manifest_path)
-assert managed["workflow_version"] == "0.4.1"
+assert managed["workflow_version"] == "0.4.2"
 assert manifest["schema_version"] == 1
 assert manifest["workflow_version"] == managed["workflow_version"]
 assert manifest["project_name"] == project_name
@@ -145,7 +147,7 @@ target = Path(sys.argv[2])
 project_name = sys.argv[3]
 version = sys.argv[4]
 managed = json.loads((repo / "managed-files.json").read_text(encoding="utf-8-sig"))
-migration = json.loads((repo / "migrations" / f"{version}-to-0.4.1.json").read_text(encoding="utf-8-sig"))
+migration = json.loads((repo / "migrations" / f"{version}-to-0.4.2.json").read_text(encoding="utf-8-sig"))
 introduced = set(migration["introduced_files"])
 files = []
 for item in managed["files"]:
@@ -345,7 +347,7 @@ fi
 
 sh "$repo_root/scripts/install.sh" "$empty_target" "$special_project_name"
 assert_manifest_contract "$empty_target" "$special_project_name" || {
-    echo "Clean installation did not create a valid 0.4.1 manifest with the exact managed paths." >&2
+    echo "Clean installation did not create a valid 0.4.2 manifest with the exact managed paths." >&2
     exit 1
 }
 
@@ -477,6 +479,19 @@ if sh "$repo_root/scripts/validate.sh" "$empty_target" >/dev/null 2>&1; then
     echo "Validator accepted an upgrade policy that releases the barrier on failure." >&2
     exit 1
 fi
+for upgrade_mutation in \
+    's/"project_scope": "current_saved_local_project_only"/"project_scope": "any_named_project"/' \
+    's/"handshake_evidence": "raw_agent_message_first_line_from_exact_thread_only"/"handshake_evidence": "task_summary_allowed"/' \
+    's/"empty_snapshot_fast_path": "after_executor_and_hub_handshake_release_without_successor_phase"/"empty_snapshot_fast_path": "always_create_successors"/' \
+    's/"empty_successor_followup_limit": 1/"empty_successor_followup_limit": 2/' \
+    's/"compensating_successor_limit": 1/"compensating_successor_limit": 2/'
+do
+    printf '%s\n' "$valid_config" | sed "$upgrade_mutation" > "$empty_target/.agents/workflow.json"
+    if sh "$repo_root/scripts/validate.sh" "$empty_target" >/dev/null 2>&1; then
+        echo "Validator accepted an invalid current-project, raw-handshake, fast-path, or bounded-recovery upgrade policy." >&2
+        exit 1
+    fi
+done
 printf '%s\n' "$valid_config" |
     sed 's/"max_active_tasks_applies_to": "subsequent_user_visible_execution_tasks"/"max_active_tasks_applies_to": "all_user_visible_tasks"/' > "$empty_target/.agents/workflow.json"
 if sh "$repo_root/scripts/validate.sh" "$empty_target"; then
@@ -748,13 +763,52 @@ sh "$repo_root/scripts/upgrade.sh" --target "$noop_invalid_target" --apply >/dev
     exit 1
 }
 
+latest_previous_project_name="Latest Previous Upgrade Project"
+create_versioned_fixture "$latest_previous_target" "$latest_previous_project_name" 0.4.1
+latest_previous_tree_before=$(digest_deployed_tree "$latest_previous_target")
+latest_previous_manifest_before=$(cksum "$latest_previous_target/.project-flow/manifest.json")
+latest_previous_plan=$(sh "$repo_root/scripts/upgrade.sh" --target "$latest_previous_target" --plan)
+printf '%s\n' "$latest_previous_plan" | grep -Fq 'UPGRADE 0.4.1 -> 0.4.2' || {
+    echo "0.4.1 upgrade plan did not report the 0.4.2 destination." >&2
+    exit 1
+}
+printf '%s\n' "$latest_previous_plan" | grep -Eq '^REPLACE[[:space:]]+structured_manual[[:space:]]+\.agents/workflow\.json$' || {
+    echo "0.4.1 upgrade plan did not replace the workflow configuration." >&2
+    exit 1
+}
+printf '%s\n' "$latest_previous_plan" | grep -Eq '^REPLACE[[:space:]]+replace_if_unmodified[[:space:]]+\.agents/prompts/10_upgrade_coordination\.md$' || {
+    echo "0.4.1 upgrade plan did not replace the upgrade-coordination prompt." >&2
+    exit 1
+}
+[ "$(digest_deployed_tree "$latest_previous_target")" = "$latest_previous_tree_before" ] &&
+    [ "$(cksum "$latest_previous_target/.project-flow/manifest.json")" = "$latest_previous_manifest_before" ] || {
+        echo "0.4.1 upgrade plan mutated the project." >&2
+        exit 1
+    }
+latest_previous_apply=$(sh "$repo_root/scripts/upgrade.sh" --target "$latest_previous_target" --apply)
+latest_previous_transaction=$(printf '%s\n' "$latest_previous_apply" | sed -n 's/^APPLIED \([A-Za-z0-9][A-Za-z0-9._-]*\)$/\1/p' | tail -n 1)
+[ -n "$latest_previous_transaction" ] || {
+    echo "0.4.1 upgrade apply did not report a transaction." >&2
+    exit 1
+}
+assert_manifest_contract "$latest_previous_target" "$latest_previous_project_name" || {
+    echo "0.4.1 upgrade did not create a valid 0.4.2 manifest." >&2
+    exit 1
+}
+sh "$repo_root/scripts/upgrade.sh" --target "$latest_previous_target" --rollback "$latest_previous_transaction" >/dev/null
+[ "$(digest_deployed_tree "$latest_previous_target")" = "$latest_previous_tree_before" ] &&
+    [ "$(cksum "$latest_previous_target/.project-flow/manifest.json")" = "$latest_previous_manifest_before" ] || {
+        echo "0.4.1 upgrade rollback did not restore the original project and manifest." >&2
+        exit 1
+    }
+
 previous_project_name="Previous Upgrade Project"
 create_versioned_fixture "$previous_target" "$previous_project_name" 0.3.1
 previous_tree_before=$(digest_deployed_tree "$previous_target")
 previous_manifest_before=$(cksum "$previous_target/.project-flow/manifest.json")
 previous_plan=$(sh "$repo_root/scripts/upgrade.sh" --target "$previous_target" --plan)
-printf '%s\n' "$previous_plan" | grep -Fq 'UPGRADE 0.3.1 -> 0.4.1' || {
-    echo "0.3.1 upgrade plan did not report the 0.4.1 destination." >&2
+printf '%s\n' "$previous_plan" | grep -Fq 'UPGRADE 0.3.1 -> 0.4.2' || {
+    echo "0.3.1 upgrade plan did not report the 0.4.2 destination." >&2
     exit 1
 }
 printf '%s\n' "$previous_plan" | grep -Eq '^CREATE[[:space:]]+replace_if_unmodified[[:space:]]+\.agents/prompts/10_upgrade_coordination\.md$' || {
@@ -773,22 +827,22 @@ previous_transaction=$(printf '%s\n' "$previous_apply" | sed -n 's/^APPLIED \([A
     exit 1
 }
 assert_manifest_contract "$previous_target" "$previous_project_name" || {
-    echo "0.3.1 upgrade did not create a valid 0.4.1 manifest." >&2
+    echo "0.3.1 upgrade did not create a valid 0.4.2 manifest." >&2
     exit 1
 }
 previous_manifest_state=$("$python_cmd" -c 'import json,sys; d=json.load(open(sys.argv[1], encoding="utf-8")); print(d["workflow_version"] + " " + d["last_transaction"])' "$previous_target/.project-flow/manifest.json")
-[ "$previous_manifest_state" = "0.4.1 $previous_transaction" ] || {
+[ "$previous_manifest_state" = "0.4.2 $previous_transaction" ] || {
     echo "0.3.1 upgrade manifest metadata is incorrect." >&2
     exit 1
 }
 previous_transaction_count=$(find "$previous_target/.project-flow/transactions" -mindepth 1 -maxdepth 1 -type d -print | wc -l | tr -d ' ')
 previous_noop=$(sh "$repo_root/scripts/upgrade.sh" --target "$previous_target" --apply)
 printf '%s\n' "$previous_noop" | grep -Fq 'NOOP already up to date' || {
-    echo "Second 0.4.1 apply after 0.3.1 upgrade did not report NOOP." >&2
+    echo "Second 0.4.2 apply after 0.3.1 upgrade did not report NOOP." >&2
     exit 1
 }
 [ "$(find "$previous_target/.project-flow/transactions" -mindepth 1 -maxdepth 1 -type d -print | wc -l | tr -d ' ')" = "$previous_transaction_count" ] || {
-    echo "Second 0.4.1 apply after 0.3.1 upgrade created an unexpected transaction." >&2
+    echo "Second 0.4.2 apply after 0.3.1 upgrade created an unexpected transaction." >&2
     exit 1
 }
 sh "$repo_root/scripts/upgrade.sh" --target "$previous_target" --rollback "$previous_transaction" >/dev/null
@@ -803,8 +857,8 @@ create_versioned_fixture "$versioned_target" "$versioned_project_name"
 versioned_tree_before=$(digest_deployed_tree "$versioned_target")
 versioned_manifest_before=$(cksum "$versioned_target/.project-flow/manifest.json")
 versioned_plan=$(sh "$repo_root/scripts/upgrade.sh" --target "$versioned_target" --plan)
-printf '%s\n' "$versioned_plan" | grep -Fq 'UPGRADE 0.3.0 -> 0.4.1' || {
-    echo "0.3.0 upgrade plan did not report the 0.4.1 destination." >&2
+printf '%s\n' "$versioned_plan" | grep -Fq 'UPGRADE 0.3.0 -> 0.4.2' || {
+    echo "0.3.0 upgrade plan did not report the 0.4.2 destination." >&2
     exit 1
 }
 printf '%s\n' "$versioned_plan" | grep -Eq '^CREATE[[:space:]]+replace_if_unmodified[[:space:]]+\.agents/prompts/10_upgrade_coordination\.md$' || {
@@ -827,22 +881,22 @@ versioned_transaction=$(printf '%s\n' "$versioned_apply" | sed -n 's/^APPLIED \(
     exit 1
 }
 assert_manifest_contract "$versioned_target" "$versioned_project_name" || {
-    echo "0.3.0 upgrade did not create a valid 0.4.1 manifest." >&2
+    echo "0.3.0 upgrade did not create a valid 0.4.2 manifest." >&2
     exit 1
 }
 versioned_manifest_state=$("$python_cmd" -c 'import json,sys; d=json.load(open(sys.argv[1], encoding="utf-8")); print(d["workflow_version"] + " " + d["last_transaction"])' "$versioned_target/.project-flow/manifest.json")
-[ "$versioned_manifest_state" = "0.4.1 $versioned_transaction" ] || {
+[ "$versioned_manifest_state" = "0.4.2 $versioned_transaction" ] || {
     echo "0.3.0 upgrade manifest metadata is incorrect." >&2
     exit 1
 }
 versioned_transaction_count=$(find "$versioned_target/.project-flow/transactions" -mindepth 1 -maxdepth 1 -type d -print | wc -l | tr -d ' ')
 versioned_noop=$(sh "$repo_root/scripts/upgrade.sh" --target "$versioned_target" --apply)
 printf '%s\n' "$versioned_noop" | grep -Fq 'NOOP already up to date' || {
-    echo "Second 0.4.1 apply did not report NOOP." >&2
+    echo "Second 0.4.2 apply did not report NOOP." >&2
     exit 1
 }
 [ "$(find "$versioned_target/.project-flow/transactions" -mindepth 1 -maxdepth 1 -type d -print | wc -l | tr -d ' ')" = "$versioned_transaction_count" ] || {
-    echo "Second 0.4.1 apply created an unexpected transaction." >&2
+    echo "Second 0.4.2 apply created an unexpected transaction." >&2
     exit 1
 }
 versioned_rollback=$(sh "$repo_root/scripts/upgrade.sh" --target "$versioned_target" --rollback "$versioned_transaction")
@@ -874,8 +928,8 @@ missing_adopt_output=$(sh "$repo_root/scripts/upgrade.sh" --target "$upgrade_tar
 }
 
 legacy_plan=$(sh "$repo_root/scripts/upgrade.sh" --target "$upgrade_target" --adopt-from 0.2.0 --plan)
-printf '%s\n' "$legacy_plan" | grep -Fq 'UPGRADE 0.2.0 -> 0.4.1' || {
-    echo "Legacy adoption plan did not report the 0.2.0 to 0.4.1 migration." >&2
+printf '%s\n' "$legacy_plan" | grep -Fq 'UPGRADE 0.2.0 -> 0.4.2' || {
+    echo "Legacy adoption plan did not report the 0.2.0 to 0.4.2 migration." >&2
     exit 1
 }
 printf '%s\n' "$legacy_plan" | grep -Eq '^CREATE[[:space:]]+replace_if_unmodified[[:space:]]+\.agents/prompts/10_upgrade_coordination\.md$' || {
@@ -948,15 +1002,15 @@ legacy_transaction=$(printf '%s\n' "$legacy_apply" | sed -n 's/^APPLIED \([A-Za-
     exit 1
 }
 cmp -s "$upgrade_target/.agents/prompts/00_project_hub.md" "$repo_root/.agents/prompts/00_project_hub.md" || {
-    echo "An unchanged legacy managed file was not updated to the 0.4.1 source." >&2
+    echo "An unchanged legacy managed file was not updated to the 0.4.2 source." >&2
     exit 1
 }
 cmp -s "$upgrade_target/.agents/prompts/09_execution_handoff.md" "$repo_root/.agents/prompts/09_execution_handoff.md" || {
-    echo "Legacy adoption did not install the 0.4.1 execution-task handoff prompt." >&2
+    echo "Legacy adoption did not install the 0.4.2 execution-task handoff prompt." >&2
     exit 1
 }
 cmp -s "$upgrade_target/.agents/prompts/10_upgrade_coordination.md" "$repo_root/.agents/prompts/10_upgrade_coordination.md" || {
-    echo "Legacy adoption did not install the 0.4.1 upgrade-coordination prompt." >&2
+    echo "Legacy adoption did not install the 0.4.2 upgrade-coordination prompt." >&2
     exit 1
 }
 [ "$(cat "$upgrade_target/docs/PROJECT_STATE.md")" = "$legacy_state_before" ] || {
@@ -964,7 +1018,7 @@ cmp -s "$upgrade_target/.agents/prompts/10_upgrade_coordination.md" "$repo_root/
     exit 1
 }
 assert_manifest_contract "$upgrade_target" "$legacy_project_name" || {
-    echo "Legacy adoption did not create a valid 0.4.1 manifest." >&2
+    echo "Legacy adoption did not create a valid 0.4.2 manifest." >&2
     exit 1
 }
 manifest_transaction=$("$python_cmd" -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["last_transaction"])' "$upgrade_target/.project-flow/manifest.json")
@@ -1105,7 +1159,7 @@ accepted_transaction=$(printf '%s\n' "$accepted_output" | sed -n 's/^APPLIED \([
     exit 1
 }
 assert_manifest_contract "$conflict_target" "Conflict Upgrade Project" || {
-    echo "Explicit local conflict acceptance did not advance to a valid 0.4.1 manifest." >&2
+    echo "Explicit local conflict acceptance did not advance to a valid 0.4.2 manifest." >&2
     exit 1
 }
 "$python_cmd" - "$conflict_target/.project-flow/transactions/$accepted_transaction/transaction.json" <<'PY'

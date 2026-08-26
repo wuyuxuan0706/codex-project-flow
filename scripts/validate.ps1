@@ -87,6 +87,11 @@ if ($AllowPlaceholders) {
         "migrations/0.3.0-to-0.4.1.json",
         "migrations/0.3.1-to-0.4.1.json",
         "migrations/0.4.0-to-0.4.1.json",
+        "migrations/0.2.0-to-0.4.2.json",
+        "migrations/0.3.0-to-0.4.2.json",
+        "migrations/0.3.1-to-0.4.2.json",
+        "migrations/0.4.0-to-0.4.2.json",
+        "migrations/0.4.1-to-0.4.2.json",
         "baselines/0.2.0/AGENTS.md",
         "baselines/0.3.0/AGENTS.md",
         "baselines/0.3.0/.agents/workflow.json",
@@ -122,6 +127,18 @@ if ($AllowPlaceholders) {
         "baselines/0.4.0/docs/DEVELOPMENT_SOP.md",
         "baselines/0.4.0/docs/PROJECT_STATE.md",
         "baselines/0.4.0/docs/WORKFLOW_GUIDE.md",
+        "baselines/0.4.1/AGENTS.md",
+        "baselines/0.4.1/.agents/workflow.json",
+        "baselines/0.4.1/.agents/prompts/00_project_hub.md",
+        "baselines/0.4.1/.agents/prompts/08_result_handoff.md",
+        "baselines/0.4.1/.agents/prompts/09_execution_handoff.md",
+        "baselines/0.4.1/.agents/prompts/10_upgrade_coordination.md",
+        "baselines/0.4.1/.agents/skills/project-workflow-manager/SKILL.md",
+        "baselines/0.4.1/.agents/skills/project-workflow-manager/agents/openai.yaml",
+        "baselines/0.4.1/.agents/snippets/AGENTS.integration.md",
+        "baselines/0.4.1/docs/DEVELOPMENT_SOP.md",
+        "baselines/0.4.1/docs/PROJECT_STATE.md",
+        "baselines/0.4.1/docs/WORKFLOW_GUIDE.md",
         "scripts/upgrade.sh",
         "scripts/upgrade.ps1",
         "skills/bootstrap-project-flow/SKILL.md",
@@ -175,6 +192,10 @@ if (Test-Path -LiteralPath $upgradePromptPath -PathType Leaf) {
         "禁止创建任何普通执行任务",
         "保持屏障",
         "不得静默解除"
+        '当前任务所属的一个已保存本地项目'
+        '原始 `agentMessage`'
+        '零任务快速路径'
+        '一次且仅一次补偿继任'
     )) {
         if (-not $upgradePromptText.Contains($requiredUpgradeText)) {
             Add-Error "Upgrade coordination prompt is missing required protocol text: $requiredUpgradeText"
@@ -277,7 +298,7 @@ if (Test-Path -LiteralPath $installManifestPath) {
                 "docs/PROJECT_STATE.md" = @("templates/PROJECT_STATE.md", "seed_once")
                 "docs/WORKFLOW_GUIDE.md" = @("docs/WORKFLOW_GUIDE.md", "replace_if_unmodified")
             }
-            if ($installManifest.schema_version -ne 1 -or [string]$installManifest.workflow_version -cne "0.4.1") {
+            if ($installManifest.schema_version -ne 1 -or [string]$installManifest.workflow_version -cne "0.4.2") {
                 throw "unsupported schema or workflow version"
             }
             $manifestProjectName = [string]$installManifest.project_name
@@ -319,7 +340,7 @@ if (Test-Path -LiteralPath $installManifestPath) {
                 }
             }
         } catch {
-            Add-Error ".project-flow/manifest.json does not satisfy the 0.4.1 install contract: $($_.Exception.Message)"
+            Add-Error ".project-flow/manifest.json does not satisfy the 0.4.2 install contract: $($_.Exception.Message)"
         }
     }
 }
@@ -592,6 +613,9 @@ if ($configParsed -and $configIsObject) {
             Add-Error "upgrade_policy.coordinator_occupies_active_task_slot must be true."
         }
         $expectedUpgradeStrings = @{
+            project_scope = "current_saved_local_project_only"
+            cross_project_behavior = "stop_before_target_read_task_mutation_or_file_mutation"
+            project_identity_validation = "exact_current_project_id_and_canonical_current_working_directory"
             coordinator_role = "temporary_user_visible_coordination_only_task"
             executor_requirement = "separate_user_visible_upgrade_execution_task"
             task_creation_barrier = "block_new_non_upgrade_execution_tasks_until_reconciled"
@@ -606,6 +630,10 @@ if ($configParsed -and $configIsObject) {
             task_handshake_format = $taskHandshakeFormat
             hub_handshake_format = $hubHandshakeFormat
             identity_validation = "exact_first_line_and_exact_managed_thread_id"
+            handshake_evidence = "raw_agent_message_first_line_from_exact_thread_only"
+            handshake_forbidden_sources = "summaries_previews_titles_reasoning_tool_output_prompt_echoes"
+            empty_snapshot_fast_path = "after_executor_and_hub_handshake_release_without_successor_phase"
+            compensating_successor_identity = "same_scope_increment_generation_and_reference_failed_successor"
             finalize_condition = "hub_acknowledged_and_every_snapshot_task_reconciled"
             failure_behavior = "keep_barrier_stop_and_report_no_fallback"
         }
@@ -615,19 +643,30 @@ if ($configParsed -and $configIsObject) {
                 Add-Error "upgrade_policy.$($entry.Key) must be $($entry.Value)."
             }
         }
+        if ($upgradePolicy.empty_successor_followup_limit -isnot [ValueType] -or
+            [int]$upgradePolicy.empty_successor_followup_limit -ne 1) {
+            Add-Error "upgrade_policy.empty_successor_followup_limit must be 1."
+        }
+        if ($upgradePolicy.compensating_successor_limit -isnot [ValueType] -or
+            [int]$upgradePolicy.compensating_successor_limit -ne 1) {
+            Add-Error "upgrade_policy.compensating_successor_limit must be 1."
+        }
         $expectedUpgradeStates = @(
+            "validate_current_project_scope",
             "discover_and_snapshot_tasks",
             "activate_creation_barrier",
             "create_upgrade_executor",
             "apply_validate_and_bind_file_transaction",
+            "collect_raw_hub_handshake",
+            "release_fast_path_when_snapshot_empty",
             "handoff_archive_and_create_successors",
-            "collect_exact_version_handshakes",
+            "collect_raw_successor_handshakes_with_bounded_recovery",
             "release_barrier"
         )
         if ($upgradePolicy.state_machine -isnot [System.Array] -or
             (@($upgradePolicy.state_machine | ForEach-Object { [string]$_ }) -join "`n") -cne
                 ($expectedUpgradeStates -join "`n")) {
-            Add-Error "upgrade_policy.state_machine must contain the exact ordered seven-state sequence."
+            Add-Error "upgrade_policy.state_machine must contain the exact ordered ten-state sequence."
         }
     }
 
@@ -931,6 +970,10 @@ if ($AllowPlaceholders) {
             $hubHandshakeFormat,
             "creation barrier",
             "active-task snapshot",
+            "current-project boundary",
+            "agentMessage.text",
+            "active-task snapshot is empty",
+            "compensating successor",
             "Never release optimistically"
         )) {
             if (-not $upgradeSkillText.Contains($requiredTaskAwareText)) {
