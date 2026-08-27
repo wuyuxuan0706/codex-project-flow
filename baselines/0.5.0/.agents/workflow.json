@@ -1,0 +1,24 @@
+{
+  "schema_version": 3,
+  "project": { "name": "<PROJECT_NAME>" },
+  "paths": { "sop": "docs/DEVELOPMENT_SOP.md", "project_state": "docs/PROJECT_STATE.md", "execution_handoff": ".agents/prompts/09_execution_handoff.md", "upgrade_coordination": ".agents/prompts/10_upgrade_coordination.md" },
+  "context": { "always": ["AGENTS.md"], "before_execution": ["docs/DEVELOPMENT_SOP.md"] },
+  "work": { "read_only": true },
+  "authorization": { "separate": ["modify", "check", "build", "test", "documentation_sync", "commit", "push", "task_rotation"], "selected_item": "create_visible_task", "upgrade_apply": "coordinator_executor_required_successors" },
+  "tasks": { "max_active": 5, "hub_occupies_slot": false, "blocked_waiting_queued_occupy_slot": true, "visible_execution_required": true, "hidden_subagents_may_substitute": false, "management_failure": "stop" },
+  "hub": { "persistent": true, "execute": false, "actions": ["analyze", "clarify", "design", "number", "create", "wait", "coordinate", "summarize"] },
+  "execution": { "parallel": ["non_conflicting"], "serial": ["high_risk", "external"], "return_to_work_on": ["requirements", "scope", "interface", "protocol", "environment", "acceptance_criteria"] },
+  "rotation": { "review_turn": 6, "latest_turn": 10, "also_on": ["milestone", "context_pressure", "user_request"], "same_scope_only": true, "sequence": ["handoff", "hub_ack", "archive_predecessor", "create_successor", "successor_recheck"], "create_failure": "restore_predecessor", "queued": "occupies_slot_no_retry", "recover": "exhaustive_project_exact_first_line", "key": "[codex-project-flow:execution:v1] projectId=<exactProjectId>; hubThreadId=<exactHubThreadId>; predecessorThreadId=<exactPredecessorThreadId>; generation=<positiveInteger>", "worktree": "authorized_transferable_checkpoint_required" },
+  "upgrade": {
+    "protocol": 2, "scope": "current_saved_local_project", "cross_project": "stop_before_read_or_mutation", "coordinator": "visible_coordination_only_occupies_slot", "executor": "separate_visible_required", "barrier": "block_ordinary_tasks_until_reconciled", "snapshot": "exhaustive_same_project_visible_tasks",
+    "conflicts": { "plugin_owned": "upstream", "project_facts_and_state": "preserve", "unowned_collision": "stop" },
+    "successor_key": "[codex-project-flow:execution:v2] projectId=<exactProjectId>; hubThreadId=<exactHubThreadId>; predecessorThreadId=<exactPredecessorThreadId>; generation=<positiveInteger>; workflowVersion=<exactWorkflowVersion>; upgradeTransaction=<exactUpgradeTransaction>",
+    "task_handshake": "[codex-project-flow:handshake:v1] projectId=<exactProjectId>; hubThreadId=<exactHubThreadId>; workflowVersion=<exactWorkflowVersion>; upgradeTransaction=<exactUpgradeTransaction>; generation=<positiveInteger>",
+    "hub_handshake": "[codex-project-flow:hub-handshake:v1] projectId=<exactProjectId>; hubThreadId=<exactHubThreadId>; workflowVersion=<exactWorkflowVersion>; upgradeTransaction=<exactUpgradeTransaction>",
+    "observe": { "evidence": "raw_agent_first_line_exact_thread", "wait_result": "signal_only", "initial_scan": "all_pages", "poll_scan_latest_turns": 3, "final_scan": "all_pages", "include_outputs": false, "stable_terminal_snapshots": 3, "poll_delays_seconds": [1, 2], "duplicates": "collapse_identical_same_thread", "forbidden": ["summary", "preview", "title", "reasoning", "tool_output", "prompt_echo"] },
+    "recovery": { "hub_followups": 1, "successor_followups": 1, "compensating_successors": 1 },
+    "fast_path": "empty_snapshot_after_executor_and_hub_handshake", "attempt_deadline_seconds": 60, "deadline": "keep_barrier_report_pending_resume_without_reapply", "successor_waits": "parallel_when_non_conflicting", "task_mutations": "serial", "failure": "keep_barrier_stop_no_fallback",
+    "sequence": ["validate_scope", "snapshot_tasks", "activate_barrier", "create_executor", "apply_validate_bind_transaction", "observe_hub", "release_empty_fast_path", "handoff_archive_create_successors", "observe_successors", "release_barrier"]
+  },
+  "handoff": { "when": ["coordination", "user_choice", "user_request"] }
+}

@@ -1,1178 +1,438 @@
 #!/bin/sh
 set -eu
 
-repo_root=$(CDPATH= cd -P "$(dirname "$0")/.." && pwd -P)
-temp_base=${TMPDIR:-/tmp}
-test_root=$(mktemp -d "$temp_base/codex-project-flow.XXXXXX")
-python_cmd=${PYTHON:-python3}
+repo=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+python_cmd=${PYTHON-python3}
+engine="$repo/scripts/project-flow.sh"
+current_version=$("$python_cmd" -c 'import pathlib,sys;print(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8-sig").strip())' "$repo/VERSION")
+tmp=$(mktemp -d "${TMPDIR-/tmp}/codex-project-flow-tests.XXXXXX")
+trap 'rm -rf "$tmp"' EXIT INT TERM
 
-cleanup() {
-    case "$test_root" in
-        "$temp_base"/codex-project-flow.*) rm -rf "$test_root" ;;
-        *) echo "Refusing to remove unexpected test path: $test_root" >&2 ;;
-    esac
+fixture() {
+  version=$1
+  name=$2
+  no_manifest=${3-false}
+  root="$tmp/$name"
+  "$python_cmd" - "$repo" "$root" "$version" "$name" "$no_manifest" <<'PY'
+import hashlib,json,pathlib,shutil,sys
+repo,path,version,name,no_manifest=pathlib.Path(sys.argv[1]),pathlib.Path(sys.argv[2]),sys.argv[3],sys.argv[4],sys.argv[5]=="true"
+path.mkdir(parents=True)
+items=json.loads((repo/"baselines"/version/"managed-files.json").read_text(encoding="utf-8-sig"))["files"]
+records=[]
+for item in items:
+ source=repo/"baselines"/version/item["path"]
+ destination=path/item["path"]
+ destination.parent.mkdir(parents=True,exist_ok=True)
+ shutil.copyfile(source,destination)
+ raw=source.read_text(encoding="utf-8-sig").replace("\r\n","\n").replace("\r","\n")
+ rendered=raw.replace("<PROJECT_NAME>",name)
+ records.append({"path":item["path"],"source":item["source"],"policy":item["policy"],"baseline_hash":"sha256:"+hashlib.sha256(rendered.encode()).hexdigest()})
+if not no_manifest:
+ manifest={"schema_version":1,"workflow_version":version,"project_name":name,"installed_at_utc":"2026-01-01T00:00:00Z","last_transaction":None,"files":records}
+ destination=path/".project-flow/manifest.json"
+ destination.parent.mkdir(parents=True,exist_ok=True)
+ destination.write_text(json.dumps(manifest,ensure_ascii=False,indent=2)+"\n",encoding="utf-8")
+lock=path/".project-flow/transaction.lock";lock.parent.mkdir(parents=True,exist_ok=True);lock.write_bytes(b"\0")
+PY
 }
-trap cleanup EXIT HUP INT TERM
 
-empty_target="$test_root/empty-project"
-existing_target="$test_root/existing-project"
-legacy_target="$test_root/legacy-project"
-versioned_target="$test_root/versioned-project"
-previous_target="$test_root/previous-project"
-latest_previous_target="$test_root/latest-previous-project"
-upgrade_target="$test_root/upgrade-project"
-ownership_target="$test_root/ownership-project"
-conflict_target="$test_root/conflict-project"
-noop_invalid_target="$test_root/noop-invalid-project"
-control_target="$test_root/control-project"
-link_target="$test_root/link-project"
-outside_target="$test_root/outside-project"
-midwrite_target="$test_root/midwrite-project"
-plugin_link_target="$test_root/plugin-link-project"
-fake_handoff_target="$test_root/fake-handoff-project"
-special_project_name='Quote "value" Backslash \ Ampersand & Pipe |'
-mkdir -p \
-    "$empty_target" \
-    "$existing_target" \
-    "$legacy_target" \
-    "$versioned_target" \
-    "$previous_target" \
-    "$latest_previous_target" \
-    "$upgrade_target" \
-    "$ownership_target" \
-    "$conflict_target" \
-    "$noop_invalid_target" \
-    "$control_target" \
-    "$link_target" \
-    "$midwrite_target" \
-    "$plugin_link_target" \
-    "$fake_handoff_target" \
-    "$outside_target"
+apply_race() {
+  root=$1
+  kind=$2
+  "$python_cmd" - "$engine" "$root" "$kind" <<'PY'
+import pathlib,subprocess,sys,time
+engine=pathlib.Path(sys.argv[1]);root=pathlib.Path(sys.argv[2]);kind=sys.argv[3]
+def files():
+ return {path.relative_to(root).as_posix():path.read_bytes() for path in root.rglob("*") if path.is_file()}
+state=root/"docs/PROJECT_STATE.md";state.write_bytes(state.read_bytes()+b"RACE-PADDING\n"+(b"P"*(4*1024*1024)))
+before=files();relative="AGENTS.md" if kind=="live" else ".project-flow/manifest.json";marker=b"RACE-LIVE\n" if kind=="live" else b"\n"
+process=subprocess.Popen(["sh",str(engine),"apply","--target",str(root)],stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+changed=False;output=[]
+for line in process.stdout:
+ output.append(line)
+ if not changed and line.startswith("TARGET "):
+  transactions=root/".project-flow/transactions";deadline=time.monotonic()+5
+  while not transactions.exists() and time.monotonic()<deadline:time.sleep(0.001)
+  assert transactions.exists(),"race hook did not reach the prepared-transaction window"
+  path=root/relative;path.write_bytes(path.read_bytes()+marker);changed=True
+error=process.stderr.read();process.wait()
+assert changed,"race hook did not observe TARGET"
+assert process.returncode!=0,(kind,"apply unexpectedly succeeded","".join(output),error)
+expected=dict(before);expected[relative]=before[relative]+marker
+assert files()==expected,(kind,"engine changed files after failed precondition")
+assert not (root/".project-flow/transactions").exists(),(kind,"failed precondition left a transaction")
+assert not (root/".project-flow/staging").exists(),(kind,"failed precondition left staging")
+reason="Managed file changed" if kind=="live" else "Manifest changed"
+assert reason in error,(kind,"missing failure reason",error)
+PY
+}
 
-assert_manifest_contract() {
-    manifest_target=$1
-    manifest_project_name=$2
-    "$python_cmd" - "$repo_root" "$manifest_target/.project-flow/manifest.json" "$manifest_project_name" <<'PY'
-import hashlib
-import json
-from pathlib import Path
-import re
-import sys
+# The full regression exercises the shared engine directly.
+"$engine" validate --allow-placeholders "$repo"
+[ ! -e "$repo/.project-flow/transaction.lock" ]
+if "$engine" validate "$repo" >/dev/null 2>&1; then
+  echo "validator accepted an unrendered source workflow without --allow-placeholders" >&2
+  exit 1
+fi
+clean="$tmp/clean"
+mkdir "$clean"
+"$engine" install --target "$clean" --project-name Clean
+"$engine" validate --target "$clean"
+"$python_cmd" - "$clean" "$repo/VERSION" <<'PY'
+import json,pathlib,sys
+root=pathlib.Path(sys.argv[1])
+manifest=json.loads((root/".project-flow/manifest.json").read_text())
+assert manifest["workflow_version"]==pathlib.Path(sys.argv[2]).read_text(encoding="utf-8-sig").strip() and len(manifest["files"])==6
+for relative in [".agents/prompts/08_result_handoff.md",".agents/snippets/AGENTS.integration.md","docs/WORKFLOW_GUIDE.md","docs/DEVELOPMENT_SOP.md"]:
+ assert not (root/relative).exists()
+PY
+workflow="$clean/.agents/workflow.json"
+manifest="$clean/.project-flow/manifest.json"
+cp "$workflow" "$tmp/workflow-original"
+cp "$manifest" "$tmp/manifest-original"
+"$python_cmd" - "$workflow" <<'PY'
+import json,pathlib,sys
+path=pathlib.Path(sys.argv[1]);value=json.loads(path.read_text(encoding="utf-8"));value["project"]["name"]="<PROJECT_NAME>";path.write_text(json.dumps(value,ensure_ascii=False,indent=2)+"\n",encoding="utf-8")
+PY
+if "$engine" validate --allow-placeholders "$clean" >/dev/null 2>&1; then
+  echo "validator accepted a placeholder identity that disagrees with the installed manifest" >&2
+  exit 1
+fi
+cp "$tmp/workflow-original" "$workflow"
+"$python_cmd" - "$manifest" <<'PY'
+import json,pathlib,sys
+path=pathlib.Path(sys.argv[1]);value=json.loads(path.read_text(encoding="utf-8"));value["project_name"]="<PROJECT_NAME>";path.write_text(json.dumps(value,ensure_ascii=False,indent=2)+"\n",encoding="utf-8")
+PY
+if "$engine" validate --allow-placeholders "$clean" >/dev/null 2>&1; then
+  echo "validator accepted a placeholder in an installed manifest" >&2
+  exit 1
+fi
+printf '[]\n' > "$manifest"
+set +e
+json_error=$("$engine" validate "$clean" 2>&1)
+json_status=$?
+set -e
+[ "$json_status" -ne 0 ]
+printf '%s\n' "$json_error" | grep -Fq 'ERROR manifest JSON root must be an object'
+if printf '%s\n' "$json_error" | grep -Fq 'Traceback'; then
+  echo "non-object JSON leaked a traceback" >&2
+  exit 1
+fi
+cp "$tmp/manifest-original" "$manifest"
+"$python_cmd" - "$workflow" <<'PY'
+import json,pathlib,sys
+path=pathlib.Path(sys.argv[1]);value=json.loads(path.read_text(encoding="utf-8"));value["tasks"]["max_active"]=1;path.write_text(json.dumps(value,ensure_ascii=False,indent=2)+"\n",encoding="utf-8")
+PY
+if "$engine" validate "$clean" >/dev/null 2>&1; then
+  echo "validator accepted max_active 1" >&2
+  exit 1
+fi
+cp "$tmp/workflow-original" "$workflow"
 
-repo = Path(sys.argv[1])
-manifest_path = Path(sys.argv[2])
-project_name = sys.argv[3]
+mv "$manifest" "$tmp/contract-manifest"
+reject_contract_mutation() {
+  mutation=$1
+  expected=$2
+  cp "$tmp/workflow-original" "$workflow"
+  "$python_cmd" - "$workflow" "$mutation" <<'PY'
+import json,pathlib,sys
+path=pathlib.Path(sys.argv[1]);value=json.loads(path.read_text(encoding="utf-8"));kind=sys.argv[2]
+mutations={
+ "role":lambda: value["upgrade"].__setitem__("transaction_task_role","coordinator_only"),
+ "fast":lambda: value["upgrade"].__setitem__("zero_active_fast_path",False),
+ "listing":lambda: value["upgrade"]["discovery"].__setitem__("listing","full_history"),
+ "history":lambda: value["upgrade"]["discovery"].__setitem__("history","exhaustive"),
+ "fallback":lambda: value["upgrade"]["discovery"].__setitem__("fallback","never"),
+ "parallel":lambda: value["upgrade"]["reconcile"].__setitem__("independent_pairs","serial"),
+ "order":lambda: value["upgrade"]["reconcile"].__setitem__("pair_order",["create_successor","archive_predecessor","verify_handshake"]),
+ "barrier":lambda: value["upgrade"]["barrier"].__setitem__("active",value["upgrade"]["barrier"]["active"].replace("state=active","state=provisional")),
+}
+mutations[kind]();path.write_text(json.dumps(value,ensure_ascii=False,indent=2)+"\n",encoding="utf-8")
+PY
+  set +e
+  contract_error=$("$engine" validate "$clean" 2>&1)
+  contract_status=$?
+  set -e
+  if [ "$contract_status" -eq 0 ]; then
+    echo "validator accepted invalid workflow contract: $mutation" >&2
+    exit 1
+  fi
+  printf '%s\n' "$contract_error" | grep -Fq "$expected"
+}
+reject_contract_mutation role 'transaction task role'
+reject_contract_mutation fast 'zero active fast path'
+reject_contract_mutation listing 'discovery listing'
+reject_contract_mutation history 'discovery history'
+reject_contract_mutation fallback 'discovery fallback'
+reject_contract_mutation parallel 'independent reconciliation'
+reject_contract_mutation order 'reconciliation pair order'
+reject_contract_mutation barrier 'active barrier'
+cp "$tmp/workflow-original" "$workflow"
+mv "$tmp/contract-manifest" "$manifest"
 
-def load_json(path):
-    with path.open("r", encoding="utf-8-sig") as handle:
-        return json.load(handle)
-
-def normalized_text(path):
-    data = path.read_bytes()
-    if data.startswith(b"\xef\xbb\xbf"):
-        data = data[3:]
-    return data.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
-
-managed = load_json(repo / "managed-files.json")
-manifest = load_json(manifest_path)
-assert managed["workflow_version"] == "0.4.2"
-assert manifest["schema_version"] == 1
-assert manifest["workflow_version"] == managed["workflow_version"]
-assert manifest["project_name"] == project_name
-assert isinstance(manifest.get("installed_at_utc"), str) and manifest["installed_at_utc"]
-assert "last_transaction" in manifest
-last_transaction = manifest.get("last_transaction")
-assert last_transaction is None or (
-    isinstance(last_transaction, str) and
-    re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", last_transaction)
+versions=$(
+  "$python_cmd" - "$repo" <<'PY'
+import pathlib,sys
+root=pathlib.Path(sys.argv[1])/"baselines"
+print(" ".join(sorted((p.name for p in root.iterdir() if p.is_dir()),key=lambda x:tuple(map(int,x.split("."))))))
+PY
 )
-
-expected = [(item["path"], item["source"], item["policy"]) for item in managed["files"]]
-actual = [(item["path"], item["source"], item["policy"]) for item in manifest["files"]]
-assert actual == expected, (actual, expected)
-assert len({item["path"] for item in manifest["files"]}) == len(expected)
-assert ".agents/prompts/09_execution_handoff.md" in {item["path"] for item in manifest["files"]}
-assert ".agents/prompts/10_upgrade_coordination.md" in {item["path"] for item in manifest["files"]}
-
-for managed_item, manifest_item in zip(managed["files"], manifest["files"]):
-    text = normalized_text(repo / managed_item["source"])
-    if managed_item["render"] == "project_name_json":
-        text = text.replace('"<PROJECT_NAME>"', json.dumps(project_name, ensure_ascii=False))
-    else:
-        text = text.replace("<PROJECT_NAME>", project_name)
-    expected_hash = "sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest()
-    assert re.fullmatch(r"sha256:[0-9a-f]{64}", manifest_item["baseline_hash"])
-    assert manifest_item["baseline_hash"] == expected_hash
-PY
-}
-
-create_legacy_fixture() {
-    fixture_target=$1
-    fixture_project_name=$2
-    "$python_cmd" - "$repo_root/baselines/0.2.0" "$fixture_target" "$fixture_project_name" <<'PY'
-import json
-from pathlib import Path
-import sys
-
-baseline = Path(sys.argv[1])
-target = Path(sys.argv[2])
-project_name = sys.argv[3]
-for source in sorted(baseline.rglob("*")):
-    if not source.is_file():
-        continue
-    relative = source.relative_to(baseline)
-    destination = target / relative
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    text = source.read_text(encoding="utf-8-sig").replace("\r\n", "\n").replace("\r", "\n")
-    if relative.as_posix() == ".agents/workflow.json":
-        text = text.replace('"<PROJECT_NAME>"', json.dumps(project_name, ensure_ascii=False))
-    else:
-        text = text.replace("<PROJECT_NAME>", project_name)
-    destination.write_text(text, encoding="utf-8", newline="")
-PY
-}
-
-create_versioned_fixture() {
-    fixture_target=$1
-    fixture_project_name=$2
-    fixture_version=${3:-0.3.0}
-    "$python_cmd" - "$repo_root" "$fixture_target" "$fixture_project_name" "$fixture_version" <<'PY'
-import hashlib
-import json
-from pathlib import Path
-import sys
-
-repo = Path(sys.argv[1])
-target = Path(sys.argv[2])
-project_name = sys.argv[3]
-version = sys.argv[4]
-managed = json.loads((repo / "managed-files.json").read_text(encoding="utf-8-sig"))
-migration = json.loads((repo / "migrations" / f"{version}-to-0.4.2.json").read_text(encoding="utf-8-sig"))
-introduced = set(migration["introduced_files"])
-files = []
-for item in managed["files"]:
-    if item["path"] in introduced:
-        continue
-    relative = Path(item["path"])
-    source = repo / "baselines" / version / relative
-    destination = target / relative
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    text = source.read_text(encoding="utf-8-sig").replace("\r\n", "\n").replace("\r", "\n")
-    if item["render"] == "project_name_json":
-        text = text.replace('"<PROJECT_NAME>"', json.dumps(project_name, ensure_ascii=False))
-    else:
-        text = text.replace("<PROJECT_NAME>", project_name)
-    destination.write_text(text, encoding="utf-8", newline="")
-    files.append({
-        "path": item["path"],
-        "source": item["source"],
-        "policy": item["policy"],
-        "baseline_hash": "sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest(),
-    })
-manifest = {
-    "schema_version": 1,
-    "workflow_version": version,
-    "project_name": project_name,
-    "installed_at_utc": "2026-08-22T00:00:00Z",
-    "last_transaction": None,
-    "files": files,
-}
-manifest_path = target / ".project-flow/manifest.json"
-manifest_path.parent.mkdir(parents=True, exist_ok=True)
-manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8", newline="")
-PY
-}
-
-digest_deployed_tree() {
-    digest_root=$1
-    find "$digest_root" -type f \
-        ! -path "$digest_root/.project-flow/*" \
-        ! -path "$digest_root/.project-flow-backup/*" -print |
-        sort |
-        while IFS= read -r file; do
-            relative=${file#"$digest_root/"}
-            set -- $(cksum "$file")
-            printf '%s=%s:%s\n' "$relative" "$1" "$2"
-        done
-}
-
-ALLOW_PLACEHOLDERS=1 sh "$repo_root/scripts/validate.sh" "$repo_root"
-
-plugin_manifest="$repo_root/.codex-plugin/plugin.json"
-bootstrap_skill="$repo_root/skills/bootstrap-project-flow/SKILL.md"
-bootstrap_openai_yaml="$repo_root/skills/bootstrap-project-flow/agents/openai.yaml"
-for plugin_file in "$plugin_manifest" "$bootstrap_skill" "$bootstrap_openai_yaml"; do
-    [ -f "$plugin_file" ] || {
-        echo "Plugin packaging file is missing: $plugin_file" >&2
-        exit 1
-    }
+for version in $versions; do
+  root="$tmp/plan-$version"
+  fixture "$version" "plan-$version"
+  output=$("$engine" upgrade --target "$root" --plan)
+  printf '%s\n' "$output" | grep -Fq "UPGRADE $version -> $current_version"
 done
 
-contract_text=$(cat \
-    "$repo_root/AGENTS.md" \
-    "$repo_root/.agents/workflow.json" \
-    "$repo_root/.agents/prompts/00_project_hub.md" \
-    "$repo_root/.agents/snippets/AGENTS.integration.md" \
-    "$repo_root/docs/DEVELOPMENT_SOP.md" \
-    "$repo_root/docs/WORKFLOW_GUIDE.md" \
-    "$repo_root/README.md" \
-    "$repo_root/skills/bootstrap-project-flow/SKILL.md")
-printf '%s\n' "$contract_text" | grep -Eq '默认最多(保留|维护)?一个|at most one active|在当前(中枢任务|会话)继续' && {
-    echo "Workflow surfaces retain a conflicting project-hub rule." >&2
-    exit 1
-}
-for required_rule in '五个' '禁止回退' '隐藏子代理' '无冲突' '授权创建'; do
-    printf '%s\n' "$contract_text" | grep -Fq "$required_rule" || {
-        echo "Workflow surfaces are missing a fail-closed rule: $required_rule" >&2
-        exit 1
-    }
-done
-
-base_version=$(sed -n '1{s/[[:space:]]*$//;p;}' "$repo_root/VERSION")
-plugin_name=$(sed -n 's/^[[:space:]]*"name"[[:space:]]*:[[:space:]]*"\([^"]*\)"[[:space:]]*,\{0,1\}[[:space:]]*$/\1/p' "$plugin_manifest" | head -n 1)
-[ "$plugin_name" = "codex-project-flow" ] || {
-    echo "Plugin manifest name is inconsistent with the repository." >&2
-    exit 1
-}
-plugin_version=$(sed -n 's/^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)"[[:space:]]*,\{0,1\}[[:space:]]*$/\1/p' "$plugin_manifest" | head -n 1)
-if [ "$plugin_version" != "$base_version" ]; then
-    build_version=${plugin_version#"$base_version"+}
-    if [ "$build_version" = "$plugin_version" ] ||
-        ! printf '%s\n' "$build_version" | grep -Eq '^[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*$'; then
-        echo "Plugin manifest version does not use VERSION as its base version." >&2
-        exit 1
-    fi
-fi
-plugin_skills=$(sed -n 's/^[[:space:]]*"skills"[[:space:]]*:[[:space:]]*"\([^"]*\)"[[:space:]]*,\{0,1\}[[:space:]]*$/\1/p' "$plugin_manifest" | head -n 1)
-[ "$plugin_skills" = "./skills/" ] || {
-    echo "Plugin manifest skills path is not ./skills/." >&2
-    exit 1
-}
-
-grep -Eq '^name:[[:space:]]*bootstrap-project-flow[[:space:]]*$' "$bootstrap_skill" || {
-    echo "Bootstrap Skill name is inconsistent with its directory." >&2
-    exit 1
-}
-bootstrap_description=$(sed -n '2,/^---[[:space:]]*$/ { s/^description:[[:space:]]*//p; }' "$bootstrap_skill" | head -n 1)
-printf '%s\n' "$bootstrap_description" | grep -Eiq '(install|import)' &&
-    printf '%s\n' "$bootstrap_description" | grep -Eiq '(claim|adopt|make)' &&
-    printf '%s\n' "$bootstrap_description" | grep -Eiq 'user-visible.*project hub' || {
-        echo "Bootstrap Skill description does not cover import and current-task project hub adoption." >&2
-        exit 1
-    }
-grep -Fq 'set_thread_pinned' "$bootstrap_skill" || {
-    echo "Bootstrap Skill does not call set_thread_pinned for the permanent project hub." >&2
-    exit 1
-}
-grep -Eiq '(pinned[^[:alnum:]_[:space:]:=]?[[:space:]]*[:=][[:space:]]*\$?true|-pinned[[:space:]]+\$?true)' "$bootstrap_skill" || {
-    echo "Bootstrap Skill does not explicitly set pinned to true." >&2
-    exit 1
-}
-bootstrap_skill_flat=$(tr '\n' ' ' < "$bootstrap_skill")
-for tool_name in read_thread set_thread_archived; do
-    printf '%s\n' "$bootstrap_skill_flat" |
-        grep -Eiq "(call|use).{0,30}$tool_name" || {
-        echo "Bootstrap Skill does not use $tool_name for project hub recovery." >&2
-        exit 1
-    }
-done
-grep -Eiq '(archived[^[:alnum:]_[:space:]:=]?[[:space:]]*[:=][[:space:]]*\$?false|-archived[[:space:]]+\$?false)' "$bootstrap_skill" || {
-    echo "Bootstrap Skill does not explicitly set archived to false." >&2
-    exit 1
-}
-grep -Eiq '(^|[^[:alnum:]_])hubKey([^[:alnum:]_]|$)' "$bootstrap_skill" || {
-    echo "Bootstrap Skill does not define the stable hubKey identifier." >&2
-    exit 1
-}
-printf '%s\n' "$bootstrap_skill_flat" |
-    grep -Eiq '\[codex-project-flow:hub:v1\].{0,160}projectId[[:space:]]*=.{1,120};[[:space:]]*hubTitle[[:space:]]*=' || {
-        echo "Bootstrap Skill hubKey does not include the v1 prefix, projectId, and hubTitle." >&2
-        exit 1
-    }
-printf '%s\n' "$bootstrap_skill_flat" |
-    grep -Eiq '((full|complete).{0,30}hubKey.{0,120}(exact|verbatim)|(exact|verbatim).{0,120}(full|complete).{0,30}hubKey)' || {
-        echo "Bootstrap Skill does not compare the complete hubKey exactly during recovery." >&2
-        exit 1
-    }
-printf '%s\n' "$bootstrap_skill_flat" |
-    grep -Eiq '\[codex-project-flow:hub-claim:v1\].{0,180}projectId[[:space:]]*=.{1,160};[[:space:]]*hubTitle[[:space:]]*=' || {
-        echo "Bootstrap Skill does not define the interrupted current-task claim identity." >&2
-        exit 1
-    }
-grep -Fq 'separateHubMode' "$bootstrap_skill" || {
-    echo "Bootstrap Skill does not preserve the explicit separate-hub compatibility mode." >&2
-    exit 1
-}
-grep -Eiq '(omit|omitted).{0,40}threadId|threadId.{0,40}(omit|omitted)' "$bootstrap_skill" || {
-    echo "Bootstrap Skill does not describe the implicit current-task title operation." >&2
-    exit 1
-}
-grep -Eiq 'exhaust(ive|ively|ion)|prove exhaustion' "$bootstrap_skill" &&
-    grep -Eiq '(reaches|reached).{0,60}(requested )?limit.{0,100}stop|stop.{0,100}(reaches|reached).{0,60}(requested )?limit' "$bootstrap_skill" || {
-        echo "Bootstrap Skill does not require exhaustive task discovery before claiming a hub." >&2
-        exit 1
-    }
-grep -Eiq 'never call `?create_thread`?.{0,120}(failed|ambiguous)|failed.{0,120}never call `?create_thread`?' "$bootstrap_skill" || {
-    echo "Bootstrap Skill does not forbid silent create_thread fallback after claim failure." >&2
-    exit 1
-}
-grep -Eiq '(queued|clientThreadId).*(do not|never|not to).*(call[[:space:]]+)?[^[:alnum:]_[:space:]]?create_thread[^[:alnum:]_[:space:]]?[[:space:]]+again' "$bootstrap_skill" || {
-        echo "Bootstrap Skill queued handling does not forbid another create_thread call." >&2
-        exit 1
-    }
-grep -Eiq '(queued|clientThreadId).*(do not|never|not to).*(immediate(ly)?[[:space:]]+(re-?run|retry)|(re-?run|retry).{0,40}immediate)' "$bootstrap_skill" || {
-        echo "Bootstrap Skill queued handling does not forbid an immediate rerun or retry." >&2
-        exit 1
-    }
-bootstrap_default_prompt=$(sed -n 's/^[[:space:]][[:space:]]*default_prompt:[[:space:]]*//p' "$bootstrap_openai_yaml" | head -n 1)
-printf '%s\n' "$bootstrap_default_prompt" | grep -Fq '$bootstrap-project-flow' || {
-    echo 'Bootstrap openai.yaml default_prompt does not reference $bootstrap-project-flow.' >&2
-    exit 1
-}
-printf '%s\n' "$bootstrap_default_prompt" | grep -Eiq '(claim|adopt).{0,80}(this|current).{0,40}(task|hub)|(this|current).{0,40}task.{0,80}(claim|adopt)' || {
-    echo "Bootstrap openai.yaml default_prompt does not make current-task hub adoption the default." >&2
-    exit 1
-}
-
-state_template="$repo_root/templates/PROJECT_STATE.md"
-source_state="$repo_root/docs/PROJECT_STATE.md"
-[ -f "$state_template" ] || {
-    echo "Project-state installation template is missing." >&2
-    exit 1
-}
-if cmp -s "$state_template" "$source_state"; then
-    echo "Repository project state must remain distinct from the blank installation template." >&2
-    exit 1
-fi
-
-sh "$repo_root/scripts/install.sh" "$empty_target" "$special_project_name"
-assert_manifest_contract "$empty_target" "$special_project_name" || {
-    echo "Clean installation did not create a valid 0.4.2 manifest with the exact managed paths." >&2
-    exit 1
-}
-
-installed_state="$empty_target/docs/PROJECT_STATE.md"
-cmp -s "$installed_state" "$state_template" || {
-    echo "Installer did not source docs/PROJECT_STATE.md from the blank installation template." >&2
-    exit 1
-}
-if cmp -s "$installed_state" "$source_state"; then
-    echo "Installer copied the repository's live project state into the target project." >&2
-    exit 1
-fi
-
-for plugin_only_path in .codex-plugin skills; do
-    [ ! -e "$empty_target/$plugin_only_path" ] || {
-        echo "Installer copied plugin-only path into the target project: $plugin_only_path" >&2
-        exit 1
-    }
-done
-sh "$repo_root/scripts/validate.sh" "$empty_target" || {
-    echo "Installed-project validation incorrectly required plugin packaging files." >&2
-    exit 1
-}
-[ -f "$empty_target/.agents/prompts/09_execution_handoff.md" ] || {
-    echo "Installer did not copy the execution-task handoff prompt." >&2
-    exit 1
-}
-[ -f "$empty_target/.agents/prompts/10_upgrade_coordination.md" ] || {
-    echo "Installer did not copy the upgrade-coordination prompt." >&2
-    exit 1
-}
-rotation_key_format='[codex-project-flow:execution:v1] projectId=<exactProjectId>; hubThreadId=<exactHubThreadId>; predecessorThreadId=<exactPredecessorThreadId>; generation=<positiveInteger>'
-for rotation_identity_file in \
-    "$empty_target/.agents/workflow.json" \
-    "$empty_target/.agents/prompts/00_project_hub.md" \
-    "$empty_target/.agents/prompts/09_execution_handoff.md"
-do
-    grep -Fq "$rotation_key_format" "$rotation_identity_file" || {
-        echo "Execution-task rotation identity is missing from $rotation_identity_file" >&2
-        exit 1
-    }
-done
-successor_key_format='[codex-project-flow:execution:v2] projectId=<exactProjectId>; hubThreadId=<exactHubThreadId>; predecessorThreadId=<exactPredecessorThreadId>; generation=<positiveInteger>; workflowVersion=<exactWorkflowVersion>; upgradeTransaction=<exactUpgradeTransaction>'
-task_handshake_format='[codex-project-flow:handshake:v1] projectId=<exactProjectId>; hubThreadId=<exactHubThreadId>; workflowVersion=<exactWorkflowVersion>; upgradeTransaction=<exactUpgradeTransaction>; generation=<positiveInteger>'
-hub_handshake_format='[codex-project-flow:hub-handshake:v1] projectId=<exactProjectId>; hubThreadId=<exactHubThreadId>; workflowVersion=<exactWorkflowVersion>; upgradeTransaction=<exactUpgradeTransaction>'
-for upgrade_identity_file in \
-    "$empty_target/.agents/workflow.json" \
-    "$empty_target/.agents/prompts/00_project_hub.md" \
-    "$empty_target/.agents/prompts/09_execution_handoff.md" \
-    "$empty_target/.agents/prompts/10_upgrade_coordination.md"
-do
-    grep -Fq "$successor_key_format" "$upgrade_identity_file" || {
-        echo "Upgrade successor identity is missing from $upgrade_identity_file" >&2
-        exit 1
-    }
-done
-upgrade_prompt="$empty_target/.agents/prompts/10_upgrade_coordination.md"
-grep -Fq "$task_handshake_format" "$upgrade_prompt" &&
-    grep -Fq "$hub_handshake_format" "$upgrade_prompt" || {
-        echo "Upgrade coordination prompt is missing an exact version handshake." >&2
-        exit 1
-    }
-valid_upgrade_prompt=$(cat "$upgrade_prompt")
-printf '%s\n' "$successor_key_format" > "$upgrade_prompt"
-if sh "$repo_root/scripts/validate.sh" "$empty_target" >/dev/null 2>&1; then
-    echo "Validator accepted a fake upgrade prompt containing only the v2 successor key." >&2
-    exit 1
-fi
-printf '%s\n' "$valid_upgrade_prompt" > "$upgrade_prompt"
-
-valid_hub_prompt=$(cat "$empty_target/.agents/prompts/00_project_hub.md")
-cp "$repo_root/baselines/0.2.0/.agents/prompts/00_project_hub.md" \
-    "$empty_target/.agents/prompts/00_project_hub.md"
-printf '\n[codex-project-flow:execution:v1] manually merged rotation identity\n' >> \
-    "$empty_target/.agents/prompts/00_project_hub.md"
-if sh "$repo_root/scripts/validate.sh" "$empty_target" >/dev/null 2>&1; then
-    echo "Validator accepted a legacy hub prompt with only a fake rotation marker." >&2
-    exit 1
-fi
-printf '%s\n' "$valid_hub_prompt" > "$empty_target/.agents/prompts/00_project_hub.md"
-
-grep -Fq '"name": "Quote \"value\" Backslash \\ Ampersand & Pipe |"' "$empty_target/.agents/workflow.json" || {
-    echo "JSON project name rendering failed for special characters." >&2
-    exit 1
-}
-grep -Fq "$special_project_name" "$empty_target/AGENTS.md" || {
-    echo "Plain-text project name rendering failed." >&2
-    exit 1
-}
-if grep -R -q '<PROJECT_NAME>' "$empty_target/AGENTS.md" "$empty_target/.agents" "$empty_target/docs"; then
-    echo "Installed project still contains <PROJECT_NAME>." >&2
-    exit 1
-fi
-
-valid_config=$(cat "$empty_target/.agents/workflow.json")
-for invalid_root in null false 0 '[]'; do
-    printf '%s\n' "$invalid_root" > "$empty_target/.agents/workflow.json"
-    if sh "$repo_root/scripts/validate.sh" "$empty_target"; then
-        echo "Validator accepted non-object JSON root: $invalid_root" >&2
-        exit 1
-    fi
-done
-printf '[%s]\n' "$valid_config" > "$empty_target/.agents/workflow.json"
-if sh "$repo_root/scripts/validate.sh" "$empty_target"; then
-    echo "Validator accepted an array containing an otherwise valid configuration object." >&2
-    exit 1
-fi
-printf '%s\n' "$valid_config" |
-    sed 's/"name": .*/"name": "   "/' > "$empty_target/.agents/workflow.json"
-if sh "$repo_root/scripts/validate.sh" "$empty_target"; then
-    echo "Validator accepted a whitespace-only project.name." >&2
-    exit 1
-fi
-printf '%s\n' "$valid_config" |
-    sed 's/"acceptance_criteria"/"acceptance_criteria", 42/' > "$empty_target/.agents/workflow.json"
-if sh "$repo_root/scripts/validate.sh" "$empty_target"; then
-    echo "Validator accepted a non-string return_to_work_on_change entry." >&2
-    exit 1
-fi
-printf '%s\n' "$valid_config" |
-    sed 's/"user_requested"/"user_requested", false/' > "$empty_target/.agents/workflow.json"
-if sh "$repo_root/scripts/validate.sh" "$empty_target"; then
-    echo "Validator accepted a non-string handoff_policy.only_when entry." >&2
-    exit 1
-fi
-printf '%s\n' "$valid_config" |
-    sed 's/"failure_behavior": "keep_barrier_stop_and_report_no_fallback"/"failure_behavior": "release_barrier_and_continue"/' > "$empty_target/.agents/workflow.json"
-if sh "$repo_root/scripts/validate.sh" "$empty_target" >/dev/null 2>&1; then
-    echo "Validator accepted an upgrade policy that releases the barrier on failure." >&2
-    exit 1
-fi
-for upgrade_mutation in \
-    's/"project_scope": "current_saved_local_project_only"/"project_scope": "any_named_project"/' \
-    's/"handshake_evidence": "raw_agent_message_first_line_from_exact_thread_only"/"handshake_evidence": "task_summary_allowed"/' \
-    's/"empty_snapshot_fast_path": "after_executor_and_hub_handshake_release_without_successor_phase"/"empty_snapshot_fast_path": "always_create_successors"/' \
-    's/"empty_successor_followup_limit": 1/"empty_successor_followup_limit": 2/' \
-    's/"compensating_successor_limit": 1/"compensating_successor_limit": 2/'
-do
-    printf '%s\n' "$valid_config" | sed "$upgrade_mutation" > "$empty_target/.agents/workflow.json"
-    if sh "$repo_root/scripts/validate.sh" "$empty_target" >/dev/null 2>&1; then
-        echo "Validator accepted an invalid current-project, raw-handshake, fast-path, or bounded-recovery upgrade policy." >&2
-        exit 1
-    fi
-done
-printf '%s\n' "$valid_config" |
-    sed 's/"max_active_tasks_applies_to": "subsequent_user_visible_execution_tasks"/"max_active_tasks_applies_to": "all_user_visible_tasks"/' > "$empty_target/.agents/workflow.json"
-if sh "$repo_root/scripts/validate.sh" "$empty_target"; then
-    echo "Validator accepted an incorrect max_active_tasks_applies_to." >&2
-    exit 1
-fi
-printf '%s\n' "$valid_config" |
-    sed 's/"max_active_tasks": 5/"max_active_tasks": 1/' > "$empty_target/.agents/workflow.json"
-if sh "$repo_root/scripts/validate.sh" "$empty_target"; then
-    echo "Validator accepted max_active_tasks set to 1." >&2
-    exit 1
-fi
-printf '%s\n' "$valid_config" |
-    sed 's/"blocked_waiting_or_queued_occupies_slot": true/"blocked_waiting_or_queued_occupies_slot": false/' > "$empty_target/.agents/workflow.json"
-if sh "$repo_root/scripts/validate.sh" "$empty_target"; then
-    echo "Validator accepted queued tasks not occupying a slot." >&2
-    exit 1
-fi
-printf '%s\n' "$valid_config" |
-    sed 's/"execution_task_requirement": "user_visible_active_task_required"/"execution_task_requirement": "hub_execution_allowed"/' > "$empty_target/.agents/workflow.json"
-if sh "$repo_root/scripts/validate.sh" "$empty_target"; then
-    echo "Validator accepted a missing user-visible execution-task requirement." >&2
-    exit 1
-fi
-printf '%s\n' "$valid_config" |
-    sed 's/"selected_item_authorization": "authorize_creation_of_corresponding_execution_task"/"selected_item_authorization": "authorize_hub_execution"/' > "$empty_target/.agents/workflow.json"
-if sh "$repo_root/scripts/validate.sh" "$empty_target"; then
-    echo "Validator accepted selection authorizing hub execution." >&2
-    exit 1
-fi
-printf '%s\n' "$valid_config" |
-    sed 's/"task_management_failure": "stop_and_report_no_hub_fallback"/"task_management_failure": "continue_in_hub"/' > "$empty_target/.agents/workflow.json"
-if sh "$repo_root/scripts/validate.sh" "$empty_target"; then
-    echo "Validator accepted task-management failure allowing hub fallback." >&2
-    exit 1
-fi
-printf '%s\n' "$valid_config" |
-    sed 's/"hidden_subagents": "must_not_substitute_user_visible_execution_tasks"/"hidden_subagents": "may_substitute"/' > "$empty_target/.agents/workflow.json"
-if sh "$repo_root/scripts/validate.sh" "$empty_target"; then
-    echo "Validator accepted hidden subagents substituting for user-visible tasks." >&2
-    exit 1
-fi
-printf '%s\n' "$valid_config" |
-    sed 's/"project_hub_role": "analyze_clarify_design_number_create_wait_coordinate_and_summarize_only"/"project_hub_role": "execute"/' > "$empty_target/.agents/workflow.json"
-if sh "$repo_root/scripts/validate.sh" "$empty_target"; then
-    echo "Validator accepted a project hub allowed to execute." >&2
-    exit 1
-fi
-printf '%s\n' "$valid_config" |
-    sed 's/"project_hub_execution_fallback": "forbidden"/"project_hub_execution_fallback": "allowed"/' > "$empty_target/.agents/workflow.json"
-if sh "$repo_root/scripts/validate.sh" "$empty_target"; then
-    echo "Validator accepted project-hub execution fallback." >&2
-    exit 1
-fi
-printf '%s\n' "$valid_config" |
-    sed 's/"non_conflicting_operations": "parallel_allowed"/"non_conflicting_operations": "serial"/' > "$empty_target/.agents/workflow.json"
-if sh "$repo_root/scripts/validate.sh" "$empty_target"; then
-    echo "Validator accepted serial-only non-conflicting operations." >&2
-    exit 1
-fi
-printf '%s\n' "$valid_config" |
-    sed 's/"project_hub_task_lifecycle": "persistent"/"project_hub_task_lifecycle": "ephemeral"/' > "$empty_target/.agents/workflow.json"
-if sh "$repo_root/scripts/validate.sh" "$empty_target"; then
-    echo "Validator accepted an incorrect project_hub_task_lifecycle." >&2
-    exit 1
-fi
-printf '%s\n' "$valid_config" |
-    sed 's/"project_hub_occupies_active_task_slot": false/"project_hub_occupies_active_task_slot": true/' > "$empty_target/.agents/workflow.json"
-if sh "$repo_root/scripts/validate.sh" "$empty_target"; then
-    echo "Validator accepted project_hub_occupies_active_task_slot set to true." >&2
-    exit 1
-fi
-printf '%s\n' "$valid_config" |
-    sed 's/"task_rotation": "separate"/"task_rotation": "combined"/' > "$empty_target/.agents/workflow.json"
-if sh "$repo_root/scripts/validate.sh" "$empty_target"; then
-    echo "Validator accepted task_rotation without separate authorization." >&2
-    exit 1
-fi
-printf '%s\n' "$valid_config" |
-    sed 's/"review_after_substantive_turns": 6/"review_after_substantive_turns": 5/' > "$empty_target/.agents/workflow.json"
-if sh "$repo_root/scripts/validate.sh" "$empty_target"; then
-    echo "Validator accepted an incorrect execution-task rotation review threshold." >&2
-    exit 1
-fi
-printf '%s\n' "$valid_config" |
-    sed 's/"archive_predecessor"/"create_second_active_task"/' > "$empty_target/.agents/workflow.json"
-if sh "$repo_root/scripts/validate.sh" "$empty_target"; then
-    echo "Validator accepted a rotation state machine without archive_predecessor." >&2
-    exit 1
-fi
-printf '%s\n' "$valid_config" > "$empty_target/.agents/workflow.json"
-"$python_cmd" - "$empty_target/.agents/workflow.json" <<'PY'
-import json, sys
-path = sys.argv[1]
-data = json.load(open(path, encoding="utf-8"))
-states = data["task_policy"]["rotation"]["state_machine"]
-states[2], states[3] = states[3], states[2]
-with open(path, "w", encoding="utf-8") as handle:
-    json.dump(data, handle, ensure_ascii=False, indent=2)
-    handle.write("\n")
+patch_upgrade="$tmp/patch-upgrade"
+fixture 0.7.0 patch-upgrade
+cp -R "$patch_upgrade" "$tmp/patch-before"
+patch_plan=$("$engine" plan --target "$patch_upgrade")
+printf '%s\n' "$patch_plan" | grep -Fq "UPGRADE 0.7.0 -> $current_version"
+patch_deletes=$(printf '%s\n' "$patch_plan" | grep -c '^DELETE' || true)
+[ "$patch_deletes" -eq 0 ]
+"$engine" apply --target "$patch_upgrade"
+"$engine" validate --target "$patch_upgrade"
+patch_txn=$("$python_cmd" - "$patch_upgrade" "$repo/VERSION" <<'PY'
+import json,pathlib,sys
+root=pathlib.Path(sys.argv[1]);version=pathlib.Path(sys.argv[2]).read_text(encoding="utf-8-sig").strip()
+manifest=json.loads((root/".project-flow/manifest.json").read_text(encoding="utf-8"))
+assert manifest["workflow_version"]==version and len(manifest["files"])==6
+print(manifest["last_transaction"])
 PY
-if sh "$repo_root/scripts/validate.sh" "$empty_target"; then
-    echo "Validator accepted a reordered execution-task rotation state machine." >&2
-    exit 1
-fi
-printf '%s\n' "$valid_config" > "$empty_target/.agents/workflow.json"
-
-digest_tree() {
-    root=$1
-    find "$root" -type f ! -path '*/.project-flow-backup/*' -print |
-        sort |
-        while IFS= read -r file; do
-            relative=${file#"$root/"}
-            set -- $(cksum "$file")
-            printf '%s=%s:%s\n' "$relative" "$1" "$2"
-        done
-}
-
-first_digest=$(digest_tree "$empty_target")
-sh "$repo_root/scripts/install.sh" "$empty_target" "$special_project_name"
-second_digest=$(digest_tree "$empty_target")
-[ "$first_digest" = "$second_digest" ] || {
-    echo "Installation is not idempotent." >&2
-    exit 1
-}
-
-control_project_name=$(printf 'Bad\tName')
-if sh "$repo_root/scripts/install.sh" "$control_target" "$control_project_name"; then
-    echo "Installer accepted a project name containing a control character." >&2
-    exit 1
-fi
-if find "$control_target" -mindepth 1 -print -quit | grep -q .; then
-    echo "Installer wrote files before rejecting a control-character project name." >&2
-    exit 1
-fi
-control_project_name='Bad
-Name'
-if sh "$repo_root/scripts/install.sh" "$control_target" "$control_project_name"; then
-    echo "Installer accepted a project name containing a line feed." >&2
-    exit 1
-fi
-if find "$control_target" -mindepth 1 -print -quit | grep -q .; then
-    echo "Installer wrote files before rejecting a line-feed project name." >&2
-    exit 1
-fi
-
-printf '# Original project rules\n' > "$midwrite_target/AGENTS.md"
-mkdir -p "$midwrite_target/.agents"
-chmod 500 "$midwrite_target/.agents"
-if [ -w "$midwrite_target/.agents" ]; then
-    chmod 700 "$midwrite_target/.agents"
-    echo "SKIP  mid-install permission failure subtest (chmod does not block writes)"
-else
-    midwrite_status=0
-    sh "$repo_root/scripts/install.sh" --target "$midwrite_target" --project-name "Midwrite Project" --force >/dev/null 2>&1 ||
-        midwrite_status=$?
-    chmod 700 "$midwrite_target/.agents"
-    [ "$midwrite_status" -ne 0 ] || {
-        echo "Installer unexpectedly succeeded when a later managed-file write was blocked." >&2
-        exit 1
-    }
-    [ "$(cat "$midwrite_target/AGENTS.md")" = '# Original project rules' ] &&
-        [ ! -e "$midwrite_target/.agents/workflow.json" ] &&
-        [ ! -e "$midwrite_target/.project-flow/manifest.json" ] || {
-            echo "Installer did not roll back files written before a mid-install failure." >&2
-            exit 1
-        }
-fi
-
-if ln -s "$outside_target" "$link_target/.agents" 2>/dev/null &&
-    [ -L "$link_target/.agents" ]; then
-    if sh "$repo_root/scripts/install.sh" "$link_target" "Linked Project"; then
-        echo "Installer accepted a target containing a symbolic link." >&2
-        exit 1
-    fi
-    if find "$outside_target" -mindepth 1 -print -quit | grep -q .; then
-        echo "Installer wrote template files through a symbolic link." >&2
-        exit 1
-    fi
-    rm "$link_target/.agents"
-else
-    rm -rf "$link_target/.agents"
-    echo "SKIP  symbolic-link safety subtest (link creation unavailable)"
-fi
-
-if ln -s "$outside_target" "$link_target/.project-flow-backup" 2>/dev/null &&
-    [ -L "$link_target/.project-flow-backup" ]; then
-    if sh "$repo_root/scripts/install.sh" "$link_target" "Backup Link Project"; then
-        echo "Installer accepted a symbolic link at .project-flow-backup." >&2
-        exit 1
-    fi
-    if find "$outside_target" -mindepth 1 -print -quit | grep -q .; then
-        echo "Installer wrote backup or template files through a symbolic link." >&2
-        exit 1
-    fi
-    rm "$link_target/.project-flow-backup"
-else
-    rm -rf "$link_target/.project-flow-backup"
-    echo "SKIP  backup symbolic-link subtest (link creation unavailable)"
-fi
-
-printf '# Existing project rules\n' > "$existing_target/AGENTS.md"
-sh "$repo_root/scripts/install.sh" "$existing_target" "Existing Project"
-[ "$(cat "$existing_target/AGENTS.md")" = "# Existing project rules" ] || {
-    echo "Default install overwrote AGENTS.md." >&2
-    exit 1
-}
-[ -f "$existing_target/.agents/snippets/AGENTS.integration.md" ] || {
-    echo "Integration snippet was not installed." >&2
-    exit 1
-}
-
-sh "$repo_root/scripts/install.sh" "$existing_target" "Existing Project" --force
-backup=$(find "$existing_target/.project-flow-backup" -type f -name AGENTS.md -print | head -n 1)
-[ -n "$backup" ] && grep -q '^# Existing project rules$' "$backup" || {
-    echo "Forced install did not preserve the existing AGENTS.md." >&2
-    exit 1
-}
-printf '\nlocal reset candidate\n' >> "$existing_target/AGENTS.md"
-"$python_cmd" - "$existing_target/.project-flow/manifest.json" <<'PY'
-import json, sys
-path = sys.argv[1]
-data = json.load(open(path, encoding="utf-8"))
-data["workflow_version"] = "9.9.9"
-with open(path, "w", encoding="utf-8") as handle:
-    json.dump(data, handle, ensure_ascii=False, indent=2)
-    handle.write("\n")
-PY
-sh "$repo_root/scripts/install.sh" "$existing_target" "Existing Project" --force
-assert_manifest_contract "$existing_target" "Existing Project" || {
-    echo "Forced reset did not replace a stale manifest with a valid current manifest." >&2
-    exit 1
-}
-grep -R -q 'local reset candidate' "$existing_target/.project-flow-backup" || {
-    echo "Forced reset did not back up the customized live file." >&2
-    exit 1
-}
-grep -R -q '"workflow_version": "9.9.9"' "$existing_target/.project-flow-backup" || {
-    echo "Forced reset did not back up the stale manifest." >&2
-    exit 1
-}
-
-mkdir -p "$legacy_target/.agents/prompts"
-printf '# Legacy prompt\n' > "$legacy_target/.agents/prompts/01_start_project.md"
-sh "$repo_root/scripts/install.sh" "$legacy_target" "Legacy Project"
-[ -f "$legacy_target/.agents/prompts/01_start_project.md" ] || {
-    echo "Installer destructively removed a legacy prompt." >&2
-    exit 1
-}
-
-sh "$repo_root/scripts/install.sh" "$noop_invalid_target" "Invalid NOOP Project"
-"$python_cmd" - "$noop_invalid_target/.project-flow/manifest.json" <<'PY'
-import json, sys
-path = sys.argv[1]
-data = json.load(open(path, encoding="utf-8"))
-data["files"][0]["policy"] = "seed_once"
-with open(path, "w", encoding="utf-8") as handle:
-    json.dump(data, handle, ensure_ascii=False, indent=2)
-    handle.write("\n")
-PY
-invalid_noop_status=0
-sh "$repo_root/scripts/upgrade.sh" --target "$noop_invalid_target" --apply >/dev/null 2>&1 || invalid_noop_status=$?
-[ "$invalid_noop_status" -ne 0 ] || {
-    echo "Upgrade reported NOOP for a manifest with an invalid source/policy contract." >&2
-    exit 1
-}
-[ ! -d "$noop_invalid_target/.project-flow/transactions" ] || {
-    echo "Rejected invalid NOOP unexpectedly created a transaction." >&2
-    exit 1
-}
-
-latest_previous_project_name="Latest Previous Upgrade Project"
-create_versioned_fixture "$latest_previous_target" "$latest_previous_project_name" 0.4.1
-latest_previous_tree_before=$(digest_deployed_tree "$latest_previous_target")
-latest_previous_manifest_before=$(cksum "$latest_previous_target/.project-flow/manifest.json")
-latest_previous_plan=$(sh "$repo_root/scripts/upgrade.sh" --target "$latest_previous_target" --plan)
-printf '%s\n' "$latest_previous_plan" | grep -Fq 'UPGRADE 0.4.1 -> 0.4.2' || {
-    echo "0.4.1 upgrade plan did not report the 0.4.2 destination." >&2
-    exit 1
-}
-printf '%s\n' "$latest_previous_plan" | grep -Eq '^REPLACE[[:space:]]+structured_manual[[:space:]]+\.agents/workflow\.json$' || {
-    echo "0.4.1 upgrade plan did not replace the workflow configuration." >&2
-    exit 1
-}
-printf '%s\n' "$latest_previous_plan" | grep -Eq '^REPLACE[[:space:]]+replace_if_unmodified[[:space:]]+\.agents/prompts/10_upgrade_coordination\.md$' || {
-    echo "0.4.1 upgrade plan did not replace the upgrade-coordination prompt." >&2
-    exit 1
-}
-[ "$(digest_deployed_tree "$latest_previous_target")" = "$latest_previous_tree_before" ] &&
-    [ "$(cksum "$latest_previous_target/.project-flow/manifest.json")" = "$latest_previous_manifest_before" ] || {
-        echo "0.4.1 upgrade plan mutated the project." >&2
-        exit 1
-    }
-latest_previous_apply=$(sh "$repo_root/scripts/upgrade.sh" --target "$latest_previous_target" --apply)
-latest_previous_transaction=$(printf '%s\n' "$latest_previous_apply" | sed -n 's/^APPLIED \([A-Za-z0-9][A-Za-z0-9._-]*\)$/\1/p' | tail -n 1)
-[ -n "$latest_previous_transaction" ] || {
-    echo "0.4.1 upgrade apply did not report a transaction." >&2
-    exit 1
-}
-assert_manifest_contract "$latest_previous_target" "$latest_previous_project_name" || {
-    echo "0.4.1 upgrade did not create a valid 0.4.2 manifest." >&2
-    exit 1
-}
-sh "$repo_root/scripts/upgrade.sh" --target "$latest_previous_target" --rollback "$latest_previous_transaction" >/dev/null
-[ "$(digest_deployed_tree "$latest_previous_target")" = "$latest_previous_tree_before" ] &&
-    [ "$(cksum "$latest_previous_target/.project-flow/manifest.json")" = "$latest_previous_manifest_before" ] || {
-        echo "0.4.1 upgrade rollback did not restore the original project and manifest." >&2
-        exit 1
-    }
-
-previous_project_name="Previous Upgrade Project"
-create_versioned_fixture "$previous_target" "$previous_project_name" 0.3.1
-previous_tree_before=$(digest_deployed_tree "$previous_target")
-previous_manifest_before=$(cksum "$previous_target/.project-flow/manifest.json")
-previous_plan=$(sh "$repo_root/scripts/upgrade.sh" --target "$previous_target" --plan)
-printf '%s\n' "$previous_plan" | grep -Fq 'UPGRADE 0.3.1 -> 0.4.2' || {
-    echo "0.3.1 upgrade plan did not report the 0.4.2 destination." >&2
-    exit 1
-}
-printf '%s\n' "$previous_plan" | grep -Eq '^CREATE[[:space:]]+replace_if_unmodified[[:space:]]+\.agents/prompts/10_upgrade_coordination\.md$' || {
-    echo "0.3.1 upgrade plan did not create the upgrade-coordination prompt." >&2
-    exit 1
-}
-[ "$(digest_deployed_tree "$previous_target")" = "$previous_tree_before" ] &&
-    [ "$(cksum "$previous_target/.project-flow/manifest.json")" = "$previous_manifest_before" ] || {
-        echo "0.3.1 upgrade plan mutated the project." >&2
-        exit 1
-    }
-previous_apply=$(sh "$repo_root/scripts/upgrade.sh" --target "$previous_target" --apply)
-previous_transaction=$(printf '%s\n' "$previous_apply" | sed -n 's/^APPLIED \([A-Za-z0-9][A-Za-z0-9._-]*\)$/\1/p' | tail -n 1)
-[ -n "$previous_transaction" ] || {
-    echo "0.3.1 upgrade apply did not report a transaction." >&2
-    exit 1
-}
-assert_manifest_contract "$previous_target" "$previous_project_name" || {
-    echo "0.3.1 upgrade did not create a valid 0.4.2 manifest." >&2
-    exit 1
-}
-previous_manifest_state=$("$python_cmd" -c 'import json,sys; d=json.load(open(sys.argv[1], encoding="utf-8")); print(d["workflow_version"] + " " + d["last_transaction"])' "$previous_target/.project-flow/manifest.json")
-[ "$previous_manifest_state" = "0.4.2 $previous_transaction" ] || {
-    echo "0.3.1 upgrade manifest metadata is incorrect." >&2
-    exit 1
-}
-previous_transaction_count=$(find "$previous_target/.project-flow/transactions" -mindepth 1 -maxdepth 1 -type d -print | wc -l | tr -d ' ')
-previous_noop=$(sh "$repo_root/scripts/upgrade.sh" --target "$previous_target" --apply)
-printf '%s\n' "$previous_noop" | grep -Fq 'NOOP already up to date' || {
-    echo "Second 0.4.2 apply after 0.3.1 upgrade did not report NOOP." >&2
-    exit 1
-}
-[ "$(find "$previous_target/.project-flow/transactions" -mindepth 1 -maxdepth 1 -type d -print | wc -l | tr -d ' ')" = "$previous_transaction_count" ] || {
-    echo "Second 0.4.2 apply after 0.3.1 upgrade created an unexpected transaction." >&2
-    exit 1
-}
-sh "$repo_root/scripts/upgrade.sh" --target "$previous_target" --rollback "$previous_transaction" >/dev/null
-[ "$(digest_deployed_tree "$previous_target")" = "$previous_tree_before" ] &&
-    [ "$(cksum "$previous_target/.project-flow/manifest.json")" = "$previous_manifest_before" ] || {
-        echo "0.3.1 upgrade rollback did not restore the original project and manifest." >&2
-        exit 1
-    }
-
-versioned_project_name="Versioned Upgrade Project"
-create_versioned_fixture "$versioned_target" "$versioned_project_name"
-versioned_tree_before=$(digest_deployed_tree "$versioned_target")
-versioned_manifest_before=$(cksum "$versioned_target/.project-flow/manifest.json")
-versioned_plan=$(sh "$repo_root/scripts/upgrade.sh" --target "$versioned_target" --plan)
-printf '%s\n' "$versioned_plan" | grep -Fq 'UPGRADE 0.3.0 -> 0.4.2' || {
-    echo "0.3.0 upgrade plan did not report the 0.4.2 destination." >&2
-    exit 1
-}
-printf '%s\n' "$versioned_plan" | grep -Eq '^CREATE[[:space:]]+replace_if_unmodified[[:space:]]+\.agents/prompts/10_upgrade_coordination\.md$' || {
-    echo "0.3.0 upgrade plan did not create the upgrade-coordination prompt." >&2
-    exit 1
-}
-printf '%s\n' "$versioned_plan" | grep -Eq '^REPLACE[[:space:]]+structured_manual[[:space:]]+\.agents/workflow\.json$' || {
-    echo "0.3.0 upgrade plan did not replace the workflow configuration." >&2
-    exit 1
-}
-[ "$(digest_deployed_tree "$versioned_target")" = "$versioned_tree_before" ] &&
-    [ "$(cksum "$versioned_target/.project-flow/manifest.json")" = "$versioned_manifest_before" ] || {
-        echo "0.3.0 upgrade plan mutated the project." >&2
-        exit 1
-    }
-versioned_apply=$(sh "$repo_root/scripts/upgrade.sh" --target "$versioned_target" --apply)
-versioned_transaction=$(printf '%s\n' "$versioned_apply" | sed -n 's/^APPLIED \([A-Za-z0-9][A-Za-z0-9._-]*\)$/\1/p' | tail -n 1)
-[ -n "$versioned_transaction" ] || {
-    echo "0.3.0 upgrade apply did not report a transaction." >&2
-    exit 1
-}
-assert_manifest_contract "$versioned_target" "$versioned_project_name" || {
-    echo "0.3.0 upgrade did not create a valid 0.4.2 manifest." >&2
-    exit 1
-}
-versioned_manifest_state=$("$python_cmd" -c 'import json,sys; d=json.load(open(sys.argv[1], encoding="utf-8")); print(d["workflow_version"] + " " + d["last_transaction"])' "$versioned_target/.project-flow/manifest.json")
-[ "$versioned_manifest_state" = "0.4.2 $versioned_transaction" ] || {
-    echo "0.3.0 upgrade manifest metadata is incorrect." >&2
-    exit 1
-}
-versioned_transaction_count=$(find "$versioned_target/.project-flow/transactions" -mindepth 1 -maxdepth 1 -type d -print | wc -l | tr -d ' ')
-versioned_noop=$(sh "$repo_root/scripts/upgrade.sh" --target "$versioned_target" --apply)
-printf '%s\n' "$versioned_noop" | grep -Fq 'NOOP already up to date' || {
-    echo "Second 0.4.2 apply did not report NOOP." >&2
-    exit 1
-}
-[ "$(find "$versioned_target/.project-flow/transactions" -mindepth 1 -maxdepth 1 -type d -print | wc -l | tr -d ' ')" = "$versioned_transaction_count" ] || {
-    echo "Second 0.4.2 apply created an unexpected transaction." >&2
-    exit 1
-}
-versioned_rollback=$(sh "$repo_root/scripts/upgrade.sh" --target "$versioned_target" --rollback "$versioned_transaction")
-printf '%s\n' "$versioned_rollback" | grep -Fq "ROLLED_BACK $versioned_transaction" || {
-    echo "0.3.0 upgrade rollback did not report success." >&2
-    exit 1
-}
-[ "$(digest_deployed_tree "$versioned_target")" = "$versioned_tree_before" ] &&
-    [ "$(cksum "$versioned_target/.project-flow/manifest.json")" = "$versioned_manifest_before" ] || {
-        echo "0.3.0 upgrade rollback did not restore the original project and manifest." >&2
-        exit 1
-    }
-
-legacy_project_name="Legacy Upgrade Project"
-create_legacy_fixture "$upgrade_target" "$legacy_project_name"
-printf '# Project state\n\nlegacy state must survive upgrade\n' > "$upgrade_target/docs/PROJECT_STATE.md"
-legacy_state_before=$(cat "$upgrade_target/docs/PROJECT_STATE.md")
-legacy_tree_before=$(digest_deployed_tree "$upgrade_target")
-
-missing_adopt_status=0
-missing_adopt_output=$(sh "$repo_root/scripts/upgrade.sh" --target "$upgrade_target" --plan 2>&1) || missing_adopt_status=$?
-[ "$missing_adopt_status" -ne 0 ] || {
-    echo "Legacy upgrade did not require explicit --adopt-from 0.2.0." >&2
-    exit 1
-}
-[ ! -e "$upgrade_target/.project-flow/manifest.json" ] || {
-    echo "Rejected legacy upgrade unexpectedly created a manifest." >&2
-    exit 1
-}
-
-legacy_plan=$(sh "$repo_root/scripts/upgrade.sh" --target "$upgrade_target" --adopt-from 0.2.0 --plan)
-printf '%s\n' "$legacy_plan" | grep -Fq 'UPGRADE 0.2.0 -> 0.4.2' || {
-    echo "Legacy adoption plan did not report the 0.2.0 to 0.4.2 migration." >&2
-    exit 1
-}
-printf '%s\n' "$legacy_plan" | grep -Eq '^CREATE[[:space:]]+replace_if_unmodified[[:space:]]+\.agents/prompts/10_upgrade_coordination\.md$' || {
-    echo "Legacy adoption plan did not create the upgrade-coordination prompt." >&2
-    exit 1
-}
-printf '%s\n' "$legacy_plan" | grep -Eq '^CREATE[[:space:]]+replace_if_unmodified[[:space:]]+\.agents/prompts/09_execution_handoff\.md$' || {
-    echo "Legacy adoption plan did not create the execution-task handoff prompt." >&2
-    exit 1
-}
-printf '%s\n' "$legacy_plan" | grep -Eq '^PRESERVE[[:space:]]+seed_once[[:space:]]+docs/PROJECT_STATE\.md$' || {
-    echo "Legacy adoption plan did not preserve docs/PROJECT_STATE.md." >&2
-    exit 1
-}
-[ "$(digest_deployed_tree "$upgrade_target")" = "$legacy_tree_before" ] &&
-    [ ! -e "$upgrade_target/.project-flow/manifest.json" ] || {
-        echo "Legacy adoption plan mutated live files or created a manifest." >&2
-        exit 1
-    }
-
-create_legacy_fixture "$fake_handoff_target" "Fake Handoff Project"
-printf '%s\n' "$rotation_key_format" > \
-    "$fake_handoff_target/.agents/prompts/09_execution_handoff.md"
-fake_handoff_tree_before=$(digest_deployed_tree "$fake_handoff_target")
-fake_handoff_status=0
-sh "$repo_root/scripts/upgrade.sh" \
-    --target "$fake_handoff_target" \
-    --adopt-from 0.2.0 \
-    --apply \
-    --accept-local .agents/prompts/09_execution_handoff.md >/dev/null 2>&1 ||
-    fake_handoff_status=$?
-[ "$fake_handoff_status" -ne 0 ] || {
-    echo "Upgrade accepted a fake local execution handoff containing only the rotation key." >&2
-    exit 1
-}
-[ "$(digest_deployed_tree "$fake_handoff_target")" = "$fake_handoff_tree_before" ] &&
-    [ ! -e "$fake_handoff_target/.project-flow/manifest.json" ] || {
-        echo "Rejected fake execution handoff was not rolled back completely." >&2
-        exit 1
-    }
-
-plugin_copy="$test_root/plugin-copy"
-outside_baselines="$test_root/outside-baselines"
-cp -R "$repo_root" "$plugin_copy"
-mkdir -p "$outside_baselines/docs"
-cp "$repo_root/baselines/0.2.0/docs/"*.md "$outside_baselines/docs/"
-rm -rf "$plugin_copy/baselines/0.2.0/docs"
-if ln -s "$outside_baselines/docs" "$plugin_copy/baselines/0.2.0/docs" 2>/dev/null &&
-    [ -L "$plugin_copy/baselines/0.2.0/docs" ]; then
-    create_legacy_fixture "$plugin_link_target" "Linked Baseline Project"
-    linked_baseline_status=0
-    sh "$plugin_copy/scripts/upgrade.sh" --target "$plugin_link_target" --adopt-from 0.2.0 --plan >/dev/null 2>&1 ||
-        linked_baseline_status=$?
-    [ "$linked_baseline_status" -ne 0 ] || {
-        echo "Upgrade accepted an immutable baseline through a symbolic-link ancestor." >&2
-        exit 1
-    }
-else
-    echo "SKIP  baseline ancestor symbolic-link subtest (link creation unavailable)"
-fi
-
-cmp -s "$repo_root/baselines/0.2.0/.agents/prompts/00_project_hub.md" "$repo_root/.agents/prompts/00_project_hub.md" && {
-    echo "Upgrade fixture cannot prove replacement because the old and new hub prompts are identical." >&2
-    exit 1
-}
-legacy_apply=$(sh "$repo_root/scripts/upgrade.sh" --target "$upgrade_target" --adopt-from 0.2.0 --apply)
-legacy_transaction=$(printf '%s\n' "$legacy_apply" | sed -n 's/^APPLIED \([A-Za-z0-9][A-Za-z0-9._-]*\)$/\1/p' | tail -n 1)
-[ -n "$legacy_transaction" ] && [ -f "$upgrade_target/.project-flow/transactions/$legacy_transaction/transaction.json" ] || {
-    echo "Legacy adoption apply did not report a durable transaction." >&2
-    exit 1
-}
-cmp -s "$upgrade_target/.agents/prompts/00_project_hub.md" "$repo_root/.agents/prompts/00_project_hub.md" || {
-    echo "An unchanged legacy managed file was not updated to the 0.4.2 source." >&2
-    exit 1
-}
-cmp -s "$upgrade_target/.agents/prompts/09_execution_handoff.md" "$repo_root/.agents/prompts/09_execution_handoff.md" || {
-    echo "Legacy adoption did not install the 0.4.2 execution-task handoff prompt." >&2
-    exit 1
-}
-cmp -s "$upgrade_target/.agents/prompts/10_upgrade_coordination.md" "$repo_root/.agents/prompts/10_upgrade_coordination.md" || {
-    echo "Legacy adoption did not install the 0.4.2 upgrade-coordination prompt." >&2
-    exit 1
-}
-[ "$(cat "$upgrade_target/docs/PROJECT_STATE.md")" = "$legacy_state_before" ] || {
-    echo "Legacy adoption changed docs/PROJECT_STATE.md." >&2
-    exit 1
-}
-assert_manifest_contract "$upgrade_target" "$legacy_project_name" || {
-    echo "Legacy adoption did not create a valid 0.4.2 manifest." >&2
-    exit 1
-}
-manifest_transaction=$("$python_cmd" -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["last_transaction"])' "$upgrade_target/.project-flow/manifest.json")
-[ "$manifest_transaction" = "$legacy_transaction" ] || {
-    echo "Legacy adoption manifest does not reference its applied transaction." >&2
-    exit 1
-}
-
-transaction_count_before=$(find "$upgrade_target/.project-flow/transactions" -mindepth 1 -maxdepth 1 -type d -print | wc -l | tr -d ' ')
-manifest_digest_before=$(cksum "$upgrade_target/.project-flow/manifest.json")
-noop_output=$(sh "$repo_root/scripts/upgrade.sh" --target "$upgrade_target" --apply)
-printf '%s\n' "$noop_output" | grep -Fq 'NOOP already up to date' || {
-    echo "Second upgrade apply did not report NOOP." >&2
-    exit 1
-}
-transaction_count_after=$(find "$upgrade_target/.project-flow/transactions" -mindepth 1 -maxdepth 1 -type d -print | wc -l | tr -d ' ')
-[ "$transaction_count_after" = "$transaction_count_before" ] &&
-    [ "$(cksum "$upgrade_target/.project-flow/manifest.json")" = "$manifest_digest_before" ] || {
-        echo "NOOP apply created a transaction or changed the manifest." >&2
-        exit 1
-    }
-
-rollback_output=$(sh "$repo_root/scripts/upgrade.sh" --target "$upgrade_target" --rollback "$legacy_transaction")
-printf '%s\n' "$rollback_output" | grep -Fq "ROLLED_BACK $legacy_transaction" || {
-    echo "Upgrade rollback did not report the restored transaction." >&2
-    exit 1
-}
-[ "$(digest_deployed_tree "$upgrade_target")" = "$legacy_tree_before" ] || {
-    echo "Rollback did not restore the complete pre-upgrade deployed state." >&2
-    exit 1
-}
-[ ! -e "$upgrade_target/.project-flow/manifest.json" ] &&
-    [ ! -e "$upgrade_target/.agents/prompts/09_execution_handoff.md" ] &&
-    [ ! -e "$upgrade_target/.agents/prompts/10_upgrade_coordination.md" ] || {
-        echo "Rollback did not restore the pre-adoption manifest and file set." >&2
-        exit 1
-    }
-
-create_versioned_fixture "$ownership_target" "Ownership Upgrade Project" "0.4.0"
-"$python_cmd" - "$ownership_target/AGENTS.md" <<'PY'
-from pathlib import Path
-import sys
-path = Path(sys.argv[1])
-text = path.read_text(encoding="utf-8")
-text = text.replace("## 项目事实\n", "## 项目事实\n\n- 必须保留的本地项目事实。\n", 1)
-path.write_text(text, encoding="utf-8", newline="")
-PY
-printf '\nlocal plugin workflow customization\n' >> "$ownership_target/.agents/prompts/10_upgrade_coordination.md"
-printf '# 项目状态\n\n必须保留的项目状态。\n' > "$ownership_target/docs/PROJECT_STATE.md"
-ownership_tree_before=$(digest_deployed_tree "$ownership_target")
-ownership_manifest_before=$(cksum "$ownership_target/.project-flow/manifest.json")
-ownership_plan=$(sh "$repo_root/scripts/upgrade.sh" --target "$ownership_target" --plan)
-printf '%s\n' "$ownership_plan" | grep -Eq '^MERGE[[:space:]]+merge_manual[[:space:]]+AGENTS\.md$' || {
-    echo "0.4.0 ownership-aware plan did not merge AGENTS.md." >&2
-    exit 1
-}
-printf '%s\n' "$ownership_plan" | grep -Eq '^UPSTREAM[[:space:]]+replace_if_unmodified[[:space:]]+\.agents/prompts/10_upgrade_coordination\.md$' || {
-    echo "0.4.0 ownership-aware plan did not replace plugin content from upstream." >&2
-    exit 1
-}
-printf '%s\n' "$ownership_plan" | grep -Eq '^PRESERVE[[:space:]]+seed_once[[:space:]]+docs/PROJECT_STATE\.md$' || {
-    echo "0.4.0 ownership-aware plan did not preserve project state." >&2
-    exit 1
-}
-ownership_output=$(sh "$repo_root/scripts/upgrade.sh" --target "$ownership_target" --apply)
-ownership_transaction=$(printf '%s\n' "$ownership_output" | sed -n 's/^APPLIED \([A-Za-z0-9][A-Za-z0-9._-]*\)$/\1/p' | tail -n 1)
-[ -n "$ownership_transaction" ] || {
-    echo "Ownership-aware apply did not create a transaction." >&2
-    exit 1
-}
-cmp -s "$ownership_target/.agents/prompts/10_upgrade_coordination.md" "$repo_root/.agents/prompts/10_upgrade_coordination.md" || {
-    echo "Plugin-owned conflict did not take upstream content." >&2
-    exit 1
-}
-grep -Fq '必须保留的本地项目事实。' "$ownership_target/AGENTS.md" &&
-    grep -Fq '插件所有的工作流内容出现 B/L/N 双向修改时自动采用新版' "$ownership_target/AGENTS.md" || {
-        echo "Mixed AGENTS.md merge did not preserve project facts and apply upstream rules." >&2
-        exit 1
-    }
-[ "$(cat "$ownership_target/docs/PROJECT_STATE.md")" = "# 项目状态
-
-必须保留的项目状态。" ] || {
-    echo "Ownership-aware upgrade changed docs/PROJECT_STATE.md." >&2
-    exit 1
-}
-"$python_cmd" - "$ownership_target/.project-flow/transactions/$ownership_transaction/transaction.json" <<'PY'
-import json, sys
-data = json.load(open(sys.argv[1], encoding="utf-8"))
-assert ".agents/prompts/10_upgrade_coordination.md" in data["upstream_resolved"]
-assert "AGENTS.md" in data["merged"]
-PY
-assert_manifest_contract "$ownership_target" "Ownership Upgrade Project"
-sh "$repo_root/scripts/upgrade.sh" --target "$ownership_target" --rollback "$ownership_transaction" >/dev/null
-[ "$(digest_deployed_tree "$ownership_target")" = "$ownership_tree_before" ] &&
-    [ "$(cksum "$ownership_target/.project-flow/manifest.json")" = "$ownership_manifest_before" ] || {
-        echo "Ownership-aware rollback did not restore the 0.4.0 project." >&2
-        exit 1
-    }
-
-create_legacy_fixture "$conflict_target" "Conflict Upgrade Project"
-cp "$repo_root/.agents/prompts/10_upgrade_coordination.md" "$conflict_target/.agents/prompts/10_upgrade_coordination.md"
-printf '\n有效但尚未纳管的本地补充。\n' >> "$conflict_target/.agents/prompts/10_upgrade_coordination.md"
-conflict_tree_before=$(digest_deployed_tree "$conflict_target")
-conflict_status=0
-conflict_output=$(sh "$repo_root/scripts/upgrade.sh" --target "$conflict_target" --adopt-from 0.2.0 --apply 2>&1) || conflict_status=$?
-[ "$conflict_status" -eq 4 ] || {
-    echo "Conflicting legacy adoption returned $conflict_status instead of 4: $conflict_output" >&2
-    exit 1
-}
-[ "$(digest_deployed_tree "$conflict_target")" = "$conflict_tree_before" ] &&
-    [ ! -e "$conflict_target/.project-flow/manifest.json" ] || {
-        echo "Conflict handling changed live managed files or the manifest." >&2
-        exit 1
-    }
-find "$conflict_target/.project-flow/staging" -type f -name plan.json -print -quit | grep -q . || {
-    echo "Conflict handling did not create a reviewable staging plan." >&2
-    exit 1
-}
-
-conflict_collision_before=$(cat "$conflict_target/.agents/prompts/10_upgrade_coordination.md")
-accepted_tree_before=$(digest_deployed_tree "$conflict_target")
-accepted_output=$(sh "$repo_root/scripts/upgrade.sh" \
-    --target "$conflict_target" \
-    --adopt-from 0.2.0 \
-    --apply \
-    --accept-local .agents/prompts/10_upgrade_coordination.md)
-printf '%s\n' "$accepted_output" | grep -Eq '^ACCEPT[[:space:]]+replace_if_unmodified[[:space:]]+\.agents/prompts/10_upgrade_coordination\.md$' || {
-    echo "Explicit local conflict acceptance was not reported in the apply plan." >&2
-    exit 1
-}
-accepted_transaction=$(printf '%s\n' "$accepted_output" | sed -n 's/^APPLIED \([A-Za-z0-9][A-Za-z0-9._-]*\)$/\1/p' | tail -n 1)
-[ -n "$accepted_transaction" ] || {
-    echo "Explicit local conflict acceptance did not create a transaction." >&2
-    exit 1
-}
-[ "$(cat "$conflict_target/.agents/prompts/10_upgrade_coordination.md")" = "$conflict_collision_before" ] || {
-    echo "Explicit local conflict acceptance overwrote the reviewed live file." >&2
-    exit 1
-}
-assert_manifest_contract "$conflict_target" "Conflict Upgrade Project" || {
-    echo "Explicit local conflict acceptance did not advance to a valid 0.4.2 manifest." >&2
-    exit 1
-}
-"$python_cmd" - "$conflict_target/.project-flow/transactions/$accepted_transaction/transaction.json" <<'PY'
-import json, sys
-data = json.load(open(sys.argv[1], encoding="utf-8"))
-assert data["accepted_local"] == [".agents/prompts/10_upgrade_coordination.md"]
+)
+"$engine" rollback --target "$patch_upgrade" --rollback "$patch_txn"
+"$python_cmd" - "$tmp/patch-before" "$patch_upgrade" <<'PY'
+import hashlib,pathlib,sys
+before,after=map(pathlib.Path,sys.argv[1:])
+def files(root):
+ return {p.relative_to(root).as_posix():hashlib.sha256(p.read_bytes()).hexdigest() for p in root.rglob("*") if p.is_file() and ".project-flow/transactions" not in p.as_posix()}
+assert files(before)==files(after)
 PY
 
-sh "$repo_root/scripts/upgrade.sh" --target "$conflict_target" --rollback "$accepted_transaction" >/dev/null
-[ "$(digest_deployed_tree "$conflict_target")" = "$accepted_tree_before" ] &&
-    [ ! -e "$conflict_target/.project-flow/manifest.json" ] || {
-        echo "Rollback after local conflict acceptance did not restore the pre-acceptance state." >&2
-        exit 1
-    }
+live_race="$tmp/live-race"
+fixture 0.6.0 live-race
+apply_race "$live_race" live
+manifest_race="$tmp/manifest-race"
+fixture 0.6.0 manifest-race
+apply_race "$manifest_race" manifest
 
-echo "All POSIX shell tests passed."
+concurrent="$tmp/concurrent-apply"
+fixture 0.6.0 concurrent-apply
+"$python_cmd" - "$engine" "$concurrent" <<'PY'
+import json,pathlib,subprocess,sys,time
+engine=pathlib.Path(sys.argv[1]);root=pathlib.Path(sys.argv[2]);state=root/"docs/PROJECT_STATE.md";state.write_bytes(state.read_bytes()+(b"L"*(128*1024*1024)))
+command=["sh",str(engine),"apply","--target",str(root)]
+first=subprocess.Popen(command,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+transactions=root/".project-flow/transactions";deadline=time.monotonic()+20
+while time.monotonic()<deadline:
+ backup_seen=transactions.exists() and any(path.is_file() and "backup" in path.parts for path in transactions.rglob("*"))
+ if backup_seen and first.poll() is None:break
+ if first.poll() is not None:
+  out,err=first.communicate();raise AssertionError(("first apply exited before lock-overlap signal",first.returncode,out,err))
+ time.sleep(0.001)
+else:
+ first.terminate();out,err=first.communicate();raise AssertionError(("first apply did not reach lock-overlap signal",out,err))
+second=subprocess.run(command,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+first_out,first_err=first.communicate()
+assert first.returncode==0,(first.returncode,first_out,first_err)
+assert second.returncode!=0 and "Writer lock is busy" in second.stderr,(second.returncode,second.stdout,second.stderr)
+manifest=json.loads((root/".project-flow/manifest.json").read_text());transactions=root/".project-flow/transactions"
+assert manifest["last_transaction"] and len([path for path in transactions.iterdir() if path.is_dir()])==1
+PY
+"$engine" validate "$concurrent" >/dev/null
+
+"$python_cmd" - "$engine" "$clean" "$concurrent" <<'PY'
+import json,os,pathlib,subprocess,sys
+engine=pathlib.Path(sys.argv[1]);root=pathlib.Path(sys.argv[2]);rollback_root=pathlib.Path(sys.argv[3]);lock=root/".project-flow/transaction.lock"
+holder=r'''
+import os,sys,time
+path=sys.argv[1];descriptor=os.open(path,os.O_RDWR|os.O_CREAT);handle=os.fdopen(descriptor,"r+b",buffering=0)
+if os.fstat(handle.fileno()).st_size==0:handle.write(b"\0");handle.flush();os.fsync(handle.fileno())
+handle.seek(0)
+if os.name=="nt":
+ import msvcrt;msvcrt.locking(handle.fileno(),msvcrt.LK_NBLCK,1)
+else:
+ import fcntl;fcntl.flock(handle.fileno(),fcntl.LOCK_EX|fcntl.LOCK_NB)
+print("READY",flush=True);time.sleep(300)
+'''
+process=subprocess.Popen([sys.executable,"-c",holder,str(lock)],stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+try:
+ assert process.stdout.readline().strip()=="READY"
+ for command in (["plan","--target",str(root)],["validate","--target",str(root)],["install","--target",str(root),"--dry-run"]):
+  completed=subprocess.run(["sh",str(engine),*command],stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True);assert completed.returncode==0,(command,completed.stderr)
+ for command in (["apply","--target",str(root)],["install","--target",str(root)]):
+  blocked=subprocess.run(["sh",str(engine),*command],stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+  assert blocked.returncode!=0 and "Writer lock is busy" in blocked.stderr,(command,blocked.returncode,blocked.stderr)
+ assert not (root/".project-flow/transactions").exists()
+finally:
+ process.terminate();process.wait(timeout=10)
+for _ in range(2):
+ completed=subprocess.run(["sh",str(engine),"apply","--target",str(root)],stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True);assert completed.returncode==0,completed.stderr;assert "NOOP already up to date" in completed.stdout
+manifest=json.loads((rollback_root/".project-flow/manifest.json").read_text());transaction=manifest["last_transaction"]
+process=subprocess.Popen([sys.executable,"-c",holder,str(rollback_root/".project-flow/transaction.lock")],stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+try:
+ assert process.stdout.readline().strip()=="READY"
+ blocked=subprocess.run(["sh",str(engine),"rollback","--target",str(rollback_root),"--rollback",transaction],stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+ assert blocked.returncode!=0 and "Writer lock is busy" in blocked.stderr,(blocked.returncode,blocked.stderr)
+finally:
+ process.terminate();process.wait(timeout=10)
+for _ in range(2):
+ completed=subprocess.run(["sh",str(engine),"rollback","--target",str(rollback_root),"--rollback",transaction],stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True);assert completed.returncode==0,completed.stderr
+PY
+
+upgrade="$tmp/upgrade"
+fixture 0.6.0 upgrade
+cp -R "$upgrade" "$tmp/before"
+plan=$("$engine" plan --target "$upgrade")
+[ "$(printf '%s\n' "$plan" | grep -c '^DELETE')" -eq 3 ]
+"$engine" apply --target "$upgrade"
+"$engine" validate "$upgrade"
+txn=$("$python_cmd" - "$upgrade" "$repo/VERSION" <<'PY'
+import hashlib,json,pathlib,sys
+root=pathlib.Path(sys.argv[1])
+manifest=json.loads((root/".project-flow/manifest.json").read_text())
+assert manifest["workflow_version"]==pathlib.Path(sys.argv[2]).read_text(encoding="utf-8-sig").strip() and len(manifest["files"])==6
+assert (root/".agents/WORKFLOW_PROTOCOL.md").is_file()
+retired=[".agents/prompts/00_project_hub.md",".agents/prompts/09_execution_handoff.md",".agents/prompts/10_upgrade_coordination.md"]
+assert all(not (root/path).exists() for path in retired)
+meta=json.loads((root/".project-flow/transactions"/manifest["last_transaction"]/"transaction.json").read_text())
+normalized=(root/".project-flow/manifest.json").read_text(encoding="utf-8-sig").replace("\r\n","\n").replace("\r","\n")
+assert "sha256:"+hashlib.sha256(normalized.encode()).hexdigest()==meta["new_manifest_hash"]
+assert manifest["last_transaction"]==meta["transaction_id"]
+assert meta["removed_files"]==retired
+assert len([item for item in meta["files"] if item["resolution"]=="DELETE"])==3
+print(manifest["last_transaction"])
+PY
+)
+"$engine" rollback --target "$upgrade" --rollback "$txn"
+"$python_cmd" - "$tmp/before" "$upgrade" <<'PY'
+import hashlib,pathlib,sys
+before,after=map(pathlib.Path,sys.argv[1:])
+def files(root):
+ return {p.relative_to(root).as_posix():hashlib.sha256(p.read_bytes()).hexdigest() for p in root.rglob("*") if p.is_file() and ".project-flow/transactions" not in p.as_posix()}
+assert files(before)==files(after)
+PY
+
+corrupt="$tmp/corrupt-backup"
+fixture 0.6.0 corrupt-backup
+"$engine" apply --target "$corrupt" >/dev/null
+corrupt_txn=$("$python_cmd" - "$corrupt" <<'PY'
+import json,pathlib,sys
+root=pathlib.Path(sys.argv[1]);manifest=json.loads((root/".project-flow/manifest.json").read_text());identifier=manifest["last_transaction"]
+meta=json.loads((root/".project-flow/transactions"/identifier/"transaction.json").read_text());record=[item for item in meta["files"] if item["changed"] and item["existed"]][-1]
+backup=root/".project-flow/transactions"/identifier/"backup"/record["path"];backup.write_bytes(b"CORRUPTED-LATE-BACKUP\n");print(identifier)
+PY
+)
+cp -R "$corrupt" "$tmp/corrupt-before"
+set +e
+corrupt_error=$("$engine" rollback --target "$corrupt" --rollback "$corrupt_txn" 2>&1)
+corrupt_status=$?
+set -e
+[ "$corrupt_status" -ne 0 ]
+printf '%s\n' "$corrupt_error" | grep -Fq 'Backup hash mismatch'
+"$python_cmd" - "$tmp/corrupt-before" "$corrupt" <<'PY'
+import hashlib,pathlib,sys
+before,after=map(pathlib.Path,sys.argv[1:])
+def files(root):return {path.relative_to(root).as_posix():hashlib.sha256(path.read_bytes()).hexdigest() for path in root.rglob("*") if path.is_file()}
+assert files(before)==files(after),"rollback restored files before authenticating the later corrupt backup"
+PY
+
+custom="$tmp/custom"
+fixture 0.6.0 custom
+printf '\nLOCAL-CUSTOM\n' >> "$custom/.agents/prompts/10_upgrade_coordination.md"
+cp "$custom/.agents/prompts/10_upgrade_coordination.md" "$tmp/custom-before"
+"$engine" upgrade --target "$custom" --apply
+[ ! -e "$custom/docs/DEVELOPMENT_SOP.md" ]
+custom_txn=$("$python_cmd" -c 'import json,sys;print(json.load(open(sys.argv[1]))["last_transaction"])' "$custom/.project-flow/manifest.json")
+"$engine" upgrade --target "$custom" --rollback "$custom_txn"
+cmp "$tmp/custom-before" "$custom/.agents/prompts/10_upgrade_coordination.md"
+
+legacy="$tmp/legacy"
+fixture 0.2.0 legacy true
+if "$engine" upgrade --target "$legacy" --plan >/dev/null 2>&1; then
+  echo "legacy accepted without explicit adoption" >&2
+  exit 1
+fi
+"$engine" upgrade --target "$legacy" --apply --adopt-from 0.2.0 --project-name Legacy
+"$engine" validate "$legacy"
+
+# All externally supplied strings reject the complete Unicode Cc category.
+control_target="$tmp/control"
+mkdir "$control_target"
+control_name=$(printf 'bad\nname')
+if "$engine" install --target "$control_target" --project-name "$control_name" >/dev/null 2>&1; then
+  echo "installer accepted a control character" >&2
+  exit 1
+fi
+if "$engine" upgrade --target "$legacy" --apply --accept-local "$control_name" >/dev/null 2>&1; then
+  echo "upgrader accepted a control character" >&2
+  exit 1
+fi
+c1_name=$(PYTHONIOENCODING=utf-8 "$python_cmd" -c 'import sys;sys.stdout.write("bad"+chr(0x85)+"name")')
+if "$engine" install --target "$control_target" --project-name "$c1_name" --dry-run >/dev/null 2>&1; then
+  echo "installer accepted a C1 control character" >&2
+  exit 1
+fi
+
+# Compatibility wrappers only forward arguments and exit status.
+for wrapper in install upgrade validate; do
+  PYTHON="$python_cmd" "$repo/scripts/$wrapper.sh" --help >/dev/null
+  set +e
+  "$repo/scripts/$wrapper.sh" --definitely-invalid >/dev/null 2>&1
+  wrapper_status=$?
+  set -e
+  if [ "$wrapper_status" -ne 2 ]; then
+    echo "$wrapper wrapper lost the engine exit status: $wrapper_status" >&2
+    exit 1
+  fi
+done
+wrapper_target="$tmp/wrapper-positional"
+mkdir "$wrapper_target"
+PYTHON="$python_cmd" "$repo/scripts/install.sh" "$wrapper_target" Wrapper --dry-run >/dev/null
+[ ! -e "$wrapper_target/AGENTS.md" ]
+[ ! -e "$wrapper_target/.project-flow/transaction.lock" ]
+PYTHON="$python_cmd" "$repo/scripts/validate.sh" "$repo" --allow-placeholders >/dev/null
+fixture 0.6.0 wrapper-upgrade
+PYTHON="$python_cmd" "$repo/scripts/upgrade.sh" "$tmp/wrapper-upgrade" --plan | grep -Fq "UPGRADE 0.6.0 -> $current_version"
+plan_no_lock="$tmp/plan-no-lock"
+fixture 0.6.0 plan-no-lock
+rm "$plan_no_lock/.project-flow/transaction.lock"
+"$engine" plan --target "$plan_no_lock" >/dev/null
+[ ! -e "$plan_no_lock/.project-flow/transaction.lock" ]
+if "$engine" unknown >/dev/null 2>&1; then
+  echo "engine accepted an unknown command" >&2
+  exit 1
+fi
+control_command=$(printf 'bad\ncommand')
+if "$engine" "$control_command" >/dev/null 2>&1; then
+  echo "engine accepted a control character in the command" >&2
+  exit 1
+fi
+
+if grep -Eq 'subprocess|scripts/validate\.sh|PY_(INSTALL|UPGRADE|VALIDATE)' "$repo/scripts/project-flow.sh"; then
+  echo "POSIX engine still contains subprocess validation or split Python programs" >&2
+  exit 1
+fi
+for invariant in 'self.assert_preconditions(plans, old_manifest_hash)' 'Written manifest hash does not match the prepared transaction' 'automatic rollback also failed'; do
+  grep -Fq "$invariant" "$repo/scripts/project-flow.sh"
+done
+grep -Fq '"schema_version": 6' "$repo/.agents/workflow.json"
+for retired in '"authorization"' '"hub"' '"handoff"' '"scope"' '"snapshot"' '"fast_path"' '"failure"' '"release"';do
+ if grep -Fq "$retired" "$repo/.agents/workflow.json";then echo "retired workflow field remains: $retired" >&2;exit 1;fi
+done
+grep -Fq '"attempt_deadline_seconds": 60' "$repo/.agents/workflow.json"
+grep -Fq '"include_outputs": false' "$repo/.agents/workflow.json"
+grep -Fq '"poll_scan_latest_turns": 3' "$repo/.agents/workflow.json"
+grep -Fq '"transaction_task_role": "visible_coordinator_executor"' "$repo/.agents/workflow.json"
+grep -Fq '"listing": "exhaustive_metadata"' "$repo/.agents/workflow.json"
+grep -Fq '"history": "targeted"' "$repo/.agents/workflow.json"
+grep -Fq '"fallback": "full_on_ambiguity"' "$repo/.agents/workflow.json"
+grep -Fq '"zero_active_fast_path": true' "$repo/.agents/workflow.json"
+grep -Fq '"independent_pairs": "parallel_within_available_slots"' "$repo/.agents/workflow.json"
+grep -Fq '"pair_order": ["archive_predecessor", "create_successor", "verify_handshake"]' "$repo/.agents/workflow.json"
+grep -Fq '"provisional": "[codex-project-flow:upgrade-barrier:v1] state=provisional; projectId=<exactProjectId>; mode=<exactMode>; sourceVersion=<exactSourceVersion>; targetVersion=<exactTargetVersion>; claimId=<exactClaimId>"' "$repo/.agents/workflow.json"
+grep -Fq '"active": "[codex-project-flow:upgrade-barrier:v1] state=active; projectId=<exactProjectId>; coordinatorThreadId=<exactCoordinatorThreadId>; sourceVersion=<exactSourceVersion>; targetVersion=<exactTargetVersion>; generation=<positiveInteger>"' "$repo/.agents/workflow.json"
+grep -Fq '"released": "[codex-project-flow:upgrade-barrier:v1] state=released; projectId=<exactProjectId>; coordinatorThreadId=<exactCoordinatorThreadId>; sourceVersion=<exactSourceVersion>; targetVersion=<exactTargetVersion>; generation=<positiveInteger>"' "$repo/.agents/workflow.json"
+grep -Fq '"cancelled": "[codex-project-flow:upgrade-barrier:v1] state=cancelled; projectId=<exactProjectId>; mode=<exactMode>; sourceVersion=<exactSourceVersion>; targetVersion=<exactTargetVersion>; claimId=<exactClaimId>"' "$repo/.agents/workflow.json"
+echo "All POSIX regression tests passed."

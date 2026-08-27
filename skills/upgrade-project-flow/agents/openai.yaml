@@ -1,4 +1,4 @@
 interface:
   display_name: "Upgrade Project Flow"
-  short_description: "Upgrade the current project's workflow with bounded task recovery"
-  default_prompt: "Use $upgrade-project-flow in this current project to plan its deployed workflow update; if I explicitly authorize apply, preserve project content, use raw task-message handshakes, take the empty-task fast path when eligible, and coordinate bounded successors."
+  short_description: "Plan, apply, resume, or roll back this project's workflow"
+  default_prompt: "Use $upgrade-project-flow from this project's permanent hub to create the visible task needed to plan, apply, resume, or roll back its workflow."

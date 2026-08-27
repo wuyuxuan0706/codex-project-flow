@@ -1,7 +1,7 @@
 {
   "name": "codex-project-flow",
-  "version": "0.4.2+codex.20260826090519",
-  "description": "Install and safely upgrade a reusable Codex workflow with current-project isolation, protected project content, raw-message handshakes, and bounded task recovery.",
+  "version": "0.7.1+codex.20260827102940",
+  "description": "Install and safely upgrade a six-file schema-6 Codex workflow with unified protocols, immutable baselines, shared platform engines, and transactional recovery.",
   "author": {
     "name": "codex-project-flow contributors"
   },
@@ -15,7 +15,7 @@
   "interface": {
     "displayName": "Codex Project Flow",
     "shortDescription": "Bootstrap, upgrade, and reconcile a permanent project workflow.",
-    "longDescription": "Adopts a permanent coordination-only project hub, upgrades only the invoking task's current project, preserves declared project content, and reconciles active user-visible tasks through an upgrade barrier, raw-message handshakes, a zero-task fast path, and bounded compensating successors.",
+    "longDescription": "Adopts a permanent coordination-only project hub, deploys one unified runtime protocol, upgrades only the invoking task's current project, derives changes from immutable baselines, and reconciles visible tasks through bounded rollback-safe recovery.",
     "developerName": "codex-project-flow contributors",
     "category": "Productivity",
     "capabilities": [

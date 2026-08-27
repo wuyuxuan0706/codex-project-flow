@@ -1,18 +1,12 @@
 {
   "schema_version": 1,
-  "workflow_version": "0.4.2",
+  "workflow_version": "0.7.1",
   "files": [
     { "path": "AGENTS.md", "source": "AGENTS.md", "policy": "merge_manual", "render": "project_name", "ownership": "mixed", "conflict_resolution": "preserve_markdown_sections", "preserve_sections": ["项目事实"] },
     { "path": ".agents/workflow.json", "source": ".agents/workflow.json", "policy": "structured_manual", "render": "project_name_json", "ownership": "plugin", "conflict_resolution": "upstream_wins" },
-    { "path": ".agents/prompts/00_project_hub.md", "source": ".agents/prompts/00_project_hub.md", "policy": "replace_if_unmodified", "render": "project_name", "ownership": "plugin", "conflict_resolution": "upstream_wins" },
-    { "path": ".agents/prompts/08_result_handoff.md", "source": ".agents/prompts/08_result_handoff.md", "policy": "replace_if_unmodified", "render": "project_name", "ownership": "plugin", "conflict_resolution": "upstream_wins" },
-    { "path": ".agents/prompts/09_execution_handoff.md", "source": ".agents/prompts/09_execution_handoff.md", "policy": "replace_if_unmodified", "render": "project_name", "ownership": "plugin", "conflict_resolution": "upstream_wins" },
-    { "path": ".agents/prompts/10_upgrade_coordination.md", "source": ".agents/prompts/10_upgrade_coordination.md", "policy": "replace_if_unmodified", "render": "project_name", "ownership": "plugin", "conflict_resolution": "upstream_wins" },
+    { "path": ".agents/WORKFLOW_PROTOCOL.md", "source": ".agents/WORKFLOW_PROTOCOL.md", "policy": "replace_if_unmodified", "render": "project_name", "ownership": "plugin", "conflict_resolution": "upstream_wins" },
     { "path": ".agents/skills/project-workflow-manager/SKILL.md", "source": ".agents/skills/project-workflow-manager/SKILL.md", "policy": "replace_if_unmodified", "render": "project_name", "ownership": "plugin", "conflict_resolution": "upstream_wins" },
     { "path": ".agents/skills/project-workflow-manager/agents/openai.yaml", "source": ".agents/skills/project-workflow-manager/agents/openai.yaml", "policy": "replace_if_unmodified", "render": "project_name", "ownership": "plugin", "conflict_resolution": "upstream_wins" },
-    { "path": ".agents/snippets/AGENTS.integration.md", "source": ".agents/snippets/AGENTS.integration.md", "policy": "replace_if_unmodified", "render": "project_name", "ownership": "plugin", "conflict_resolution": "upstream_wins" },
-    { "path": "docs/DEVELOPMENT_SOP.md", "source": "docs/DEVELOPMENT_SOP.md", "policy": "merge_manual", "render": "project_name", "ownership": "plugin", "conflict_resolution": "upstream_wins" },
-    { "path": "docs/PROJECT_STATE.md", "source": "templates/PROJECT_STATE.md", "policy": "seed_once", "render": "project_name", "ownership": "project", "conflict_resolution": "preserve" },
-    { "path": "docs/WORKFLOW_GUIDE.md", "source": "docs/WORKFLOW_GUIDE.md", "policy": "replace_if_unmodified", "render": "project_name", "ownership": "plugin", "conflict_resolution": "upstream_wins" }
+    { "path": "docs/PROJECT_STATE.md", "source": "templates/PROJECT_STATE.md", "policy": "seed_once", "render": "project_name", "ownership": "project", "conflict_resolution": "preserve" }
   ]
 }

@@ -1,0 +1,852 @@
+[CmdletBinding()]
+param([Parameter(Mandatory,Position=0)][ValidateSet("install","upgrade","plan","apply","rollback","validate")][string]$Command,[string]$Target=".",[string]$ProjectName="",[switch]$Force,[switch]$DryRun,[switch]$Plan,[switch]$Apply,[string]$Rollback="",[string]$AdoptFrom="",[string[]]$AcceptLocal=@(),[switch]$AllowPlaceholders)
+$ErrorActionPreference="Stop"
+$script:EngineRoot=Split-Path -Parent $MyInvocation.MyCommand.Path;$script:PluginRoot=Split-Path -Parent $script:EngineRoot
+$script:Utf8NoBom=[Text.UTF8Encoding]::new($false);$script:Utf8Strict=[Text.UTF8Encoding]::new($false,$true)
+$script:ControlRootName=".project-flow";$script:BackupRootName=".project-flow-backup";$script:ManifestRelative=".project-flow/manifest.json"
+$script:ValidPolicies=@("seed_once","merge_manual","structured_manual","replace_if_unmodified");$script:ValidRenderModes=@("none","project_name","project_name_json");$script:ValidOwnership=@("plugin","mixed","project");$script:ValidConflictResolution=@("upstream_wins","preserve_markdown_sections","preserve");$script:FlowContext=$null
+function Set-FlowContext([string]$Target,[string]$ProjectName=""){$root=[IO.Path]::GetFullPath($Target);if(-not(Test-Path -LiteralPath $root -PathType Container)){throw "Target directory does not exist: $root"};$item=Get-Item -LiteralPath $root -Force;if(($item.Attributes-band[IO.FileAttributes]::ReparsePoint)-ne0){throw "Target directory must not be a symbolic link, junction, or reparse point: $root"};$script:FlowContext=[pscustomobject]@{TargetRoot=$root;PluginRoot=$script:PluginRoot;ProjectName=$ProjectName}}
+function Test-SafeRelative([string]$RelativePath,[switch]$AllowControl){if([string]::IsNullOrWhiteSpace($RelativePath)-or[IO.Path]::IsPathRooted($RelativePath)-or$RelativePath.Contains("\")-or$RelativePath-match"^[A-Za-z]:"){return $false};foreach($character in $RelativePath.ToCharArray()){if([char]::IsControl($character)){return $false}};$parts=$RelativePath.Split('/');if(@($parts|Where-Object{$_-in@("",".","..")}).Count){return $false};if(-not$AllowControl-and$parts[0]-in@($script:ControlRootName,$script:BackupRootName)){return $false};return $true}
+function Assert-WithinRoot([string]$Path,[string]$Root,[string]$Label){$full=[IO.Path]::GetFullPath($Path);$base=[IO.Path]::GetFullPath($Root);$prefix=$base.TrimEnd('\','/')+[IO.Path]::DirectorySeparatorChar;if($full-ne$base-and-not$full.StartsWith($prefix,[StringComparison]::OrdinalIgnoreCase)){throw "$Label escapes its root: $full"}}
+function Resolve-TargetPath([string]$RelativePath,[switch]$AllowControl){if(-not(Test-SafeRelative $RelativePath -AllowControl:$AllowControl)){throw "Unsafe relative target path: $RelativePath"};$root=$script:FlowContext.TargetRoot;$full=[IO.Path]::GetFullPath((Join-Path $root ($RelativePath.Replace('/',[IO.Path]::DirectorySeparatorChar))));Assert-WithinRoot $full $root "Target path";$current=$root;foreach($part in $RelativePath.Split('/')){$current=Join-Path $current $part;$item=Get-Item -LiteralPath $current -Force -ErrorAction SilentlyContinue;if($null-eq$item){break};if(($item.Attributes-band[IO.FileAttributes]::ReparsePoint)-ne0){throw "Refusing target path through a symbolic link, junction, or reparse point: $current"}};return $full}
+function Resolve-PluginPath([string]$RelativePath,[string]$Label="plugin input",[switch]$AllowMissingTail){if(-not(Test-SafeRelative $RelativePath -AllowControl)){throw "Unsafe plugin input path: $RelativePath"};$root=$script:PluginRoot;$full=[IO.Path]::GetFullPath((Join-Path $root ($RelativePath.Replace('/',[IO.Path]::DirectorySeparatorChar))));Assert-WithinRoot $full $root $Label;$current=$root;$missing=$false;foreach($part in $RelativePath.Split('/')){$current=Join-Path $current $part;if($missing){continue};$item=Get-Item -LiteralPath $current -Force -ErrorAction SilentlyContinue;if($null-eq$item){if($AllowMissingTail){$missing=$true;continue};throw "$Label is missing or unsafe: $RelativePath"};if(($item.Attributes-band[IO.FileAttributes]::ReparsePoint)-ne0){throw "$Label path uses a symbolic link, junction, or reparse point: $RelativePath"}};if(-not$missing){$item=Get-Item -LiteralPath $full -Force;if($item.PSIsContainer){throw "$Label is not a regular file: $RelativePath"}};return $full}
+function Ensure-SafeDirectory([string]$Directory){$root=$script:FlowContext.TargetRoot;$full=[IO.Path]::GetFullPath($Directory);Assert-WithinRoot $full $root "Directory";if($full-eq$root){return};$prefix=$root.TrimEnd('\','/')+[IO.Path]::DirectorySeparatorChar;$current=$root;foreach($part in $full.Substring($prefix.Length).Split([char[]]@('\','/'),[StringSplitOptions]::RemoveEmptyEntries)){$current=Join-Path $current $part;$item=Get-Item -LiteralPath $current -Force -ErrorAction SilentlyContinue;if($null-eq$item){[IO.Directory]::CreateDirectory($current)|Out-Null}elseif(-not$item.PSIsContainer-or(($item.Attributes-band[IO.FileAttributes]::ReparsePoint)-ne0)){throw "Directory path is not a real directory: $current"}}}
+function Enter-TransactionLock {
+    $path = Resolve-TargetPath "$script:ControlRootName/transaction.lock" -AllowControl
+    Ensure-SafeDirectory (Split-Path -Parent $path)
+    $handle = $null
+    try {
+        $handle = [IO.File]::Open($path,[IO.FileMode]::OpenOrCreate,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None)
+        if ($handle.Length -lt 1) { $handle.SetLength(1) }
+        $handle.Lock(0,1)
+        return $handle
+    } catch [IO.IOException] {
+        if ($null -ne $handle) { $handle.Dispose() }
+        throw "Another project-flow mutation holds the transaction lock: $path"
+    } catch {
+        if ($null -ne $handle) { $handle.Dispose() }
+        throw
+    }
+}
+function Exit-TransactionLock([IO.FileStream]$Handle) { if ($null -ne $Handle) { try { $Handle.Unlock(0,1) } catch { } finally { $Handle.Dispose() } } }
+function Test-SafeFile([string]$Path,[string]$Label){$item=Get-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue;if($null-eq$item){return $false};if($item.PSIsContainer-or(($item.Attributes-band[IO.FileAttributes]::ReparsePoint)-ne0)){throw "$Label exists and is not a safe regular file: $Path"};return $true}
+function ConvertFrom-Utf8Bytes([byte[]]$Bytes,[string]$Label){$offset=if($Bytes.Length-ge3-and$Bytes[0]-eq0xEF-and$Bytes[1]-eq0xBB-and$Bytes[2]-eq0xBF){3}else{0};try{$text=$script:Utf8Strict.GetString($Bytes,$offset,$Bytes.Length-$offset)}catch{throw "$Label is not UTF-8 text: $($_.Exception.Message)"};return $text.Replace("`r`n","`n").Replace("`r","`n")}
+function Read-NormalizedText([string]$Path,[string]$Label){if(-not(Test-SafeFile $Path $Label)){throw "$Label is missing: $Path"};return ConvertFrom-Utf8Bytes ([IO.File]::ReadAllBytes($Path)) $Label}
+function ConvertFrom-JsonObjectText([string]$Text,[string]$Label){try{if($Text-notmatch'^\s*\{'){throw "JSON root must be an object"};$parsed=$Text|ConvertFrom-Json;if($parsed-isnot[pscustomobject]){throw "JSON root must be an object"};return $parsed}catch{throw "$Label is invalid JSON: $($_.Exception.Message)"}}
+function Read-JsonFile([string]$Path,[string]$Label){return ConvertFrom-JsonObjectText (Read-NormalizedText $Path $Label) $Label}
+function Get-TextHash([string]$Text){$sha=[Security.Cryptography.SHA256]::Create();try{return "sha256:"+([BitConverter]::ToString($sha.ComputeHash($script:Utf8NoBom.GetBytes($Text)))).Replace("-","").ToLowerInvariant()}finally{$sha.Dispose()}}
+function Get-FileHashNormalized([string]$Path,[string]$Label){return Get-TextHash (Read-NormalizedText $Path $Label)}
+function Write-AtomicBytes([string]$Path,[byte[]]$Bytes){Assert-WithinRoot $Path $script:FlowContext.TargetRoot "Write path";Ensure-SafeDirectory (Split-Path -Parent $Path);$exists=Test-SafeFile $Path "Destination";$tmp="$Path.project-flow-tmp-$PID-$([guid]::NewGuid().ToString('N').Substring(0,8))";try{[IO.File]::WriteAllBytes($tmp,$Bytes);if($exists){[IO.File]::Move($tmp,$Path,$true)}else{[IO.File]::Move($tmp,$Path)}}finally{if(Test-Path -LiteralPath $tmp){Remove-Item -LiteralPath $tmp -Force}}}
+function Write-AtomicText([string]$Path,[string]$Text){Write-AtomicBytes $Path ($script:Utf8NoBom.GetBytes($Text))}
+function Render-Template([string]$Text,[string]$Mode,[string]$Name){if($Mode-eq"none"){return $Text};if($Mode-eq"project_name"){return $Text.Replace("<PROJECT_NAME>",$Name)};if($Mode-eq"project_name_json"){return $Text.Replace('"<PROJECT_NAME>"',(ConvertTo-Json $Name -Compress))};throw "Unsupported render mode: $Mode"}
+function Test-Property([object]$Object,[string]$Name){return $null-ne$Object-and$null-ne$Object.PSObject.Properties[$Name]}
+function Confirm-ProjectName([string]$Name){if([string]::IsNullOrWhiteSpace($Name)){throw "Project name must not be empty."};foreach($character in $Name.ToCharArray()){if([char]::IsControl($character)){throw "Project name must not contain control characters."}};return $Name}
+function Assert-ManagedEntry([object]$Entry,[hashtable]$Seen,[switch]$Baseline){$r=[string]$Entry.path;$s=[string]$Entry.source;if(-not(Test-SafeRelative $r)-or-not(Test-SafeRelative $s -AllowControl)-or$Seen.ContainsKey($r)){throw "Unsafe or duplicate managed path: $r"};$Seen[$r]=$true;if($script:ValidPolicies-notcontains[string]$Entry.policy){throw "Unsupported policy for $r"};if($script:ValidRenderModes-notcontains[string]$Entry.render){throw "Unsupported render mode for $r"};if($Baseline){if([string]$Entry.content_hash-notmatch'^sha256:[0-9a-f]{64}$'){throw "Invalid baseline hash for $r"};return};if($script:ValidOwnership-notcontains[string]$Entry.ownership){throw "Unsupported ownership for $r"};if($script:ValidConflictResolution-notcontains[string]$Entry.conflict_resolution){throw "Unsupported conflict_resolution for $r"};if($Entry.conflict_resolution-eq"upstream_wins"-and$Entry.ownership-ne"plugin"){throw "upstream_wins requires plugin ownership for $r"};if($Entry.conflict_resolution-eq"preserve"-and$Entry.ownership-ne"project"){throw "preserve requires project ownership for $r"};if($Entry.conflict_resolution-eq"preserve_markdown_sections"){if($Entry.ownership-ne"mixed"-or$Entry.preserve_sections-isnot[Array]-or@($Entry.preserve_sections).Count-eq0){throw "Invalid protected sections for $r"}}elseif(Test-Property $Entry "preserve_sections"){throw "Unexpected preserve_sections for $r"}}
+function Get-CurrentManagedContract{$version=(Read-NormalizedText (Resolve-PluginPath "VERSION" "VERSION") "VERSION").Trim();if($version-notmatch'^\d+\.\d+\.\d+$'){throw "VERSION must be SemVer"};$managed=Read-JsonFile (Resolve-PluginPath "managed-files.json" "managed-files.json") "managed-files.json";if($managed.schema_version-ne1-or[string]$managed.workflow_version-cne$version-or$managed.files-isnot[Array]){throw "managed-files.json does not match VERSION"};$entries=@($managed.files);if(-not$entries.Count){throw "managed files empty"};$seen=@{};foreach($e in $entries){Assert-ManagedEntry $e $seen;Resolve-PluginPath ([string]$e.source) "managed source"|Out-Null};$state=@($entries|Where-Object path -ceq "docs/PROJECT_STATE.md");if($state.Count-ne1-or$state[0].policy-cne"seed_once"-or$state[0].ownership-cne"project"-or$state[0].conflict_resolution-cne"preserve"){throw "PROJECT_STATE contract invalid"};$agents=@($entries|Where-Object path -ceq "AGENTS.md");if($agents.Count-ne1-or$agents[0].ownership-cne"mixed"-or$agents[0].conflict_resolution-cne"preserve_markdown_sections"-or(@($agents[0].preserve_sections)-join"`n")-cne"项目事实"){throw "AGENTS contract invalid"};return [pscustomobject]@{Version=$version;Managed=$managed;Entries=$entries;Seen=$seen}}
+function Get-BaselineContract([string]$Version){if($Version-notmatch'^\d+\.\d+\.\d+$'){throw "Invalid baseline version: $Version"};$p=Resolve-PluginPath "baselines/$Version/managed-files.json" "baseline metadata" -AllowMissingTail;if(-not(Test-Path -LiteralPath $p -PathType Leaf)){throw "No supported migration from $Version"};$c=Read-JsonFile $p "baseline metadata";if($c.schema_version-ne1-or$c.kind-cne"managed_files_baseline"-or$c.workflow_version-cne$Version-or$c.files-isnot[Array]-or-not@($c.files).Count){throw "Invalid baseline contract: $Version"};$seen=@{};foreach($e in @($c.files)){Assert-ManagedEntry $e $seen -Baseline;$bp=Resolve-PluginPath "baselines/$Version/$([string]$e.path)" "baseline $([string]$e.path)";if((Get-FileHashNormalized $bp "baseline $([string]$e.path)")-cne[string]$e.content_hash){throw "Baseline content hash mismatch for $([string]$e.path)"}};return [pscustomobject]@{Version=$Version;Entries=@($c.files);Seen=$seen}}
+function Remove-EmptyParents([string]$Path){$current=Split-Path -Parent $Path;while($current-ne$script:FlowContext.TargetRoot-and(Split-Path -Leaf $current)-ne$script:ControlRootName){$item=Get-Item -LiteralPath $current -Force -ErrorAction SilentlyContinue;if($null-eq$item-or-not$item.PSIsContainer-or(($item.Attributes-band[IO.FileAttributes]::ReparsePoint)-ne0)){break};if(@(Get-ChildItem -LiteralPath $current -Force).Count-ne0){break};Remove-Item -LiteralPath $current -Force;$current=Split-Path -Parent $current}}
+
+function Invoke-Install {[CmdletBinding()]param([string]$Target=".",[string]$ProjectName="",[switch]$Force,[switch]$DryRun)
+ Set-FlowContext $Target $ProjectName;$targetRoot=$script:FlowContext.TargetRoot;$templateRoot=$script:PluginRoot;$controlRootName=$script:ControlRootName;$manifestRelative=$script:ManifestRelative;$backupRootName=$script:BackupRootName
+if ([string]::IsNullOrWhiteSpace($ProjectName)) { $ProjectName = Split-Path -Leaf $targetRoot }
+$ProjectName = Confirm-ProjectName $ProjectName
+
+$script:FlowContext.ProjectName = $ProjectName
+$contract = Get-CurrentManagedContract
+$workflowVersion = $contract.Version
+$rawEntries = $contract.Entries
+$entries = [Collections.Generic.List[object]]::new()
+foreach ($raw in $rawEntries) {
+ $sourcePath=Resolve-PluginPath ([string]$raw.source) "managed source";$sourceText=Read-NormalizedText $sourcePath ([string]$raw.source)
+ $entries.Add([pscustomobject]@{Path=[string]$raw.path;Source=[string]$raw.source;Policy=[string]$raw.policy;Render=[string]$raw.render;SourcePath=$sourcePath;Rendered=Render-Template $sourceText ([string]$raw.render) $ProjectName})
+}
+$manifestPath = Resolve-TargetPath $manifestRelative -AllowControl
+$manifestExisted = Test-SafeFile $manifestPath "Manifest"
+$hadExistingManaged = $false
+foreach ($entry in $entries) {
+    $destination = Resolve-TargetPath $entry.Path
+    if (Test-SafeFile $destination "Destination") { $hadExistingManaged = $true }
+}
+
+$legacyWithoutManifest = -not $Force -and -not $manifestExisted -and $hadExistingManaged
+if ($legacyWithoutManifest -and -not $DryRun) {
+    Write-Host "NOTICE Existing managed files were found without a manifest."
+    Write-Host "NOTICE The files will keep normal non-force skip behavior, but the manifest will not be initialized."
+    Write-Host "NOTICE Run the explicit upgrade with -AdoptFrom 0.2.0 to adopt this legacy installation."
+}
+
+$backupStamp = Get-Date -Format "yyyyMMdd-HHmmss"
+$backupRelative = "$backupRootName/$backupStamp"
+$backupRoot = Resolve-TargetPath $backupRelative -AllowControl
+$backupSuffix = 0
+while (Test-Path -LiteralPath $backupRoot) {
+    $backupSuffix++
+    $backupRelative = "$backupRootName/$backupStamp-$backupSuffix"
+    $backupRoot = Resolve-TargetPath $backupRelative -AllowControl
+}
+
+$created = 0
+$replaced = 0
+$skipped = 0
+$written = 0
+$manifestBackedUp = $false
+$installState = [pscustomobject]@{ ManifestChanged = $false }
+$writeRecords = New-Object System.Collections.Generic.List[object]
+
+function Backup-File([string]$Source, [string]$RelativePath) {
+    $backup = Resolve-TargetPath "$backupRelative/$RelativePath" -AllowControl
+    Ensure-SafeDirectory (Split-Path -Parent $backup)
+    [System.IO.File]::WriteAllBytes($backup, [System.IO.File]::ReadAllBytes($Source))
+}
+
+function Restore-InstallChanges {
+    for ($index = $writeRecords.Count - 1; $index -ge 0; $index--) {
+        $record = $writeRecords[$index]
+        $destination = Resolve-TargetPath $record.Path
+        if ($record.Existed) {
+            $backup = Resolve-TargetPath "$backupRelative/$($record.Path)" -AllowControl
+            [System.IO.File]::WriteAllBytes($destination, [System.IO.File]::ReadAllBytes($backup))
+        } elseif (Test-Path -LiteralPath $destination -PathType Leaf) {
+            [System.IO.File]::Delete($destination)
+        }
+    }
+    if ($installState.ManifestChanged) {
+        if ($manifestExisted) {
+            $backupManifest = Resolve-TargetPath "$backupRelative/$manifestRelative" -AllowControl
+            [System.IO.File]::WriteAllBytes($manifestPath, [System.IO.File]::ReadAllBytes($backupManifest))
+        } elseif (Test-Path -LiteralPath $manifestPath -PathType Leaf) {
+            [System.IO.File]::Delete($manifestPath)
+        }
+        $installState.ManifestChanged = $false
+    }
+    Write-Warning "Restored install changes after validation failure."
+}
+
+$mutationLock = if ($DryRun) { $null } else { Enter-TransactionLock }
+try {
+if ($Force -and $manifestExisted -and -not $DryRun) {
+    Backup-File $manifestPath $manifestRelative
+    $manifestBackedUp = $true
+}
+
+try {
+    foreach ($entry in $entries) {
+        $destination = Resolve-TargetPath $entry.Path
+        $exists = Test-SafeFile $destination "Destination"
+        if ($exists -and -not $Force) {
+            Write-Host "SKIP  $($entry.Path) (already exists)"
+            $skipped++
+            continue
+        }
+        if ($DryRun) {
+            $verb = if ($exists) { "REPLACE" } else { "CREATE " }
+            Write-Host "$verb $($entry.Path)"
+            continue
+        }
+        if ($exists) {
+            Backup-File $destination $entry.Path
+            $replaced++
+        } else {
+            $created++
+        }
+        $writeRecords.Add([pscustomobject]@{ Path = $entry.Path; Existed = $exists })
+        Write-AtomicText $destination $entry.Rendered
+        $written++
+        Write-Host "WRITE $($entry.Path)"
+    }
+} catch {
+    if (-not $DryRun) { Restore-InstallChanges }
+    throw
+}
+
+if ($DryRun) {
+    if ($Force) {
+        Write-Host "DRY RUN manifest reset was not performed."
+    } elseif ($manifestExisted) {
+        Write-Host "PRESERVE $manifestRelative (already exists; dry run)"
+    } elseif ($legacyWithoutManifest) {
+        Write-Host "MANIFEST NOT INITIALIZED; explicit upgrade with -AdoptFrom 0.2.0 is required."
+    } else {
+        Write-Host "DRY RUN manifest initialization was not performed."
+    }
+    Write-Host "Dry run complete; no files changed and the manifest was not created or replaced."
+    return 0
+}
+
+Write-Host "Installed: created=$created replaced=$replaced skipped=$skipped"
+if (Test-Path -LiteralPath $backupRoot -PathType Container) {
+    Write-Host "Backups: $backupRoot"
+}
+
+if (-not $Force) {
+    if (-not (Invoke-Validation -Target $targetRoot)) { Restore-InstallChanges; throw "Post-install validation failed." }
+}
+
+$initializeManifest = $false
+$replaceManifest = $false
+if ($Force) {
+    if ($written -ne $entries.Count) {
+        Restore-InstallChanges
+        throw "Force reset did not render every managed file; manifest was preserved."
+    }
+    $initializeManifest = $true
+    $replaceManifest = $manifestExisted
+} elseif ($manifestExisted) {
+    Write-Host "PRESERVE $manifestRelative (already exists)"
+} elseif ($legacyWithoutManifest) {
+    Write-Host "MANIFEST NOT INITIALIZED; run the explicit upgrade with -AdoptFrom 0.2.0."
+} else {
+    if ($written -ne $entries.Count) {
+        Restore-InstallChanges
+        throw "Clean install did not render every managed file; manifest was not initialized."
+    }
+    $initializeManifest = $true
+}
+
+if ($initializeManifest) {
+    $manifestFiles = @($entries | ForEach-Object {
+        $destination = Resolve-TargetPath $_.Path
+        $liveText = Read-NormalizedText $destination $_.Path
+        $baselineHash = Get-TextHash $_.Rendered
+        if ((Get-TextHash $liveText) -ne $baselineHash) {
+            Restore-InstallChanges
+            throw "Installed file does not match its rendered baseline: $($_.Path)"
+        }
+        [ordered]@{
+            path = $_.Path
+            source = $_.Source
+            policy = $_.Policy
+            baseline_hash = $baselineHash
+        }
+    })
+    if ($replaceManifest -and -not $manifestBackedUp) {
+        Restore-InstallChanges
+        throw "Refusing to replace a manifest that was not backed up."
+    }
+    $manifest = [ordered]@{
+        schema_version = 1
+        workflow_version = $workflowVersion
+        project_name = $ProjectName
+        installed_at_utc = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+        last_transaction = $null
+        files = $manifestFiles
+    }
+    try {
+        Write-AtomicText $manifestPath (($manifest | ConvertTo-Json -Depth 20) + "`n")
+        $installState.ManifestChanged = $true
+    } catch {
+        Restore-InstallChanges
+        throw
+    }
+    Write-Host "$(if ($replaceManifest) { 'RESET' } else { 'WRITE' }) $manifestRelative"
+    if (-not (Invoke-Validation -Target $targetRoot)) { Restore-InstallChanges; throw "Post-manifest validation failed." }
+}
+ return 0
+} finally {
+    Exit-TransactionLock $mutationLock
+}
+}
+
+function Invoke-Upgrade {[CmdletBinding()]param([string]$Target=".",[switch]$Plan,[switch]$Apply,[string]$Rollback="",[string]$AdoptFrom="",[string]$ProjectName="",[string[]]$AcceptLocal=@())
+ Set-FlowContext $Target $ProjectName;$targetRoot=$script:FlowContext.TargetRoot;$pluginRoot=$script:PluginRoot;$controlRootName=$script:ControlRootName;$manifestRelative=$script:ManifestRelative;$validPolicies=$script:ValidPolicies;$validOwnership=$script:ValidOwnership;$validConflictResolution=$script:ValidConflictResolution
+if ($Apply -and $Plan) { throw "-Apply and -Plan are mutually exclusive." }
+if ($Rollback -and ($Apply -or $Plan)) { throw "-Rollback is mutually exclusive with -Apply and -Plan." }
+if ($AcceptLocal.Count -gt 0 -and -not $Apply) { throw "-AcceptLocal requires -Apply." }
+function Merge-ProtectedMarkdownSections(
+    [string]$LiveText,
+    [string]$NewText,
+    [object[]]$SectionNames,
+    [string]$RelativePath
+) {
+    $merged = $NewText
+    foreach ($rawName in $SectionNames) {
+        $name = [string]$rawName
+        if ([string]::IsNullOrWhiteSpace($name) -or $name.Contains("`n") -or $name.Contains("`r")) {
+            throw "Invalid protected Markdown section for $RelativePath"
+        }
+        $pattern = "(?ms)^##[ \t]+$([regex]::Escape($name))[ \t]*\n.*?(?=^##[ \t]+|\z)"
+        $liveMatches = [regex]::Matches($LiveText, $pattern)
+        $newMatches = [regex]::Matches($merged, $pattern)
+        if ($liveMatches.Count -ne 1 -or $newMatches.Count -ne 1) {
+            throw "Protected Markdown section '$name' must appear exactly once in local and upstream $RelativePath"
+        }
+        $match = $newMatches[0]
+        $merged = $merged.Remove($match.Index, $match.Length).Insert($match.Index, $liveMatches[0].Value)
+    }
+    return $merged
+}
+
+function New-TransactionId {
+    return (Get-Date).ToUniversalTime().ToString("yyyyMMddTHHmmssZ") + "-$PID-" + [guid]::NewGuid().ToString('N').Substring(0, 8)
+}
+
+function Resolve-TransactionRoot([string]$Identifier) {
+    if ($Identifier -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$') { throw "Invalid transaction identifier." }
+    return Resolve-TargetPath "$controlRootName/transactions/$Identifier" -AllowControl
+}
+
+function Remove-PreparedTransaction([string]$Identifier) {
+    $root = Resolve-TransactionRoot $Identifier
+    $item = Get-Item -LiteralPath $root -Force -ErrorAction SilentlyContinue
+    if ($null -eq $item) { return }
+    if (-not $item.PSIsContainer -or (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)) { throw "Prepared transaction root is unsafe: $Identifier" }
+    foreach ($child in Get-ChildItem -LiteralPath $root -Recurse -Force) {
+        if (($child.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw "Prepared transaction contains a reparse point: $($child.FullName)" }
+    }
+    [IO.Directory]::Delete($root,$true)
+}
+
+$contract=Get-CurrentManagedContract
+$newVersion=$contract.Version
+$entries=@($contract.Entries)
+$seen=$contract.Seen
+
+function Get-VersionPathMap([string]$Version){$map=@{};$sourceEntries=if($Version-eq$newVersion){$entries}else{(Get-BaselineContract $Version).Entries};foreach($entry in $sourceEntries){$map[[string]$entry.path]=$true};return $map}
+
+function Get-VerifiedManagedSnapshot([object]$PlanItem,[string]$Stage) {
+    $path = Resolve-TargetPath $PlanItem.Path
+    $item = Get-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+    if ($item -and ($item.PSIsContainer -or (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0))) {
+        throw "Managed target changed to a non-regular file $Stage`: $($PlanItem.Path)"
+    }
+    $bytes = if ($item) { [IO.File]::ReadAllBytes($path) } else { $null }
+    $hash = if ($item) { Get-TextHash (ConvertFrom-Utf8Bytes $bytes $PlanItem.Path) } else { $null }
+    if ($hash -cne $PlanItem.LiveHash) { throw "Managed target changed $Stage`; refusing apply: $($PlanItem.Path)" }
+    return [pscustomobject]@{ Path = $path; Exists = ($null -ne $item); Bytes = $bytes; Hash = $hash }
+}
+
+function Get-VerifiedManifestSnapshot([AllowNull()][object]$ExpectedHash,[string]$Stage) {
+    $item = Get-Item -LiteralPath $manifestPath -Force -ErrorAction SilentlyContinue
+    if ($item -and ($item.PSIsContainer -or (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0))) {
+        throw "Manifest changed to a non-regular file $Stage."
+    }
+    $bytes = if ($item) { [IO.File]::ReadAllBytes($manifestPath) } else { $null }
+    $text = if ($item) { ConvertFrom-Utf8Bytes $bytes $manifestRelative } else { $null }
+    $hash = if ($item) { Get-TextHash $text } else { $null }
+    if ($hash -cne $ExpectedHash) { throw "Manifest changed $Stage`; refusing apply." }
+    return [pscustomobject]@{ Exists = ($null -ne $item); Bytes = $bytes; Text = $text; Hash = $hash }
+}
+
+$manifestPath = Resolve-TargetPath $manifestRelative -AllowControl
+$manifest = $null
+$plannedManifestHash = $null
+if (Test-Path -LiteralPath $manifestPath -PathType Leaf) {
+    $plannedManifestText = Read-NormalizedText $manifestPath $manifestRelative
+    $manifest = ConvertFrom-JsonObjectText $plannedManifestText $manifestRelative
+    $plannedManifestHash = Get-TextHash $plannedManifestText
+    if ($manifest.schema_version -ne 1) { throw "Unsupported manifest schema." }
+    if ($AdoptFrom) { throw "-AdoptFrom is only valid when the target has no manifest." }
+} elseif (-not $Rollback -and $AdoptFrom -ne "0.2.0") {
+    throw "Missing .project-flow/manifest.json; explicitly pass -AdoptFrom 0.2.0 for a confirmed legacy deployment."
+}
+
+function Invoke-TransactionRollback([string]$Identifier,[bool]$Automatic=$false,[string[]]$AppliedPaths=$null,[bool]$ManifestWritten=$true) {
+    $transactionRoot = Resolve-TransactionRoot $Identifier
+    $metaPath = Join-Path $transactionRoot "transaction.json"
+    $rootItem = Get-Item -LiteralPath $transactionRoot -Force -ErrorAction SilentlyContinue
+    if ($null -eq $rootItem -or -not $rootItem.PSIsContainer -or (($rootItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0)) {
+        throw "Transaction does not exist or is unsafe: $Identifier"
+    }
+    $metaText = Read-NormalizedText $metaPath "transaction.json"
+    $meta = ConvertFrom-JsonObjectText $metaText "transaction.json"
+    $metaPreflightHash = Get-TextHash $metaText
+    if ($meta.schema_version -ne 1 -or $meta.transaction_id -ne $Identifier -or $meta.target -ne $targetRoot) {
+        throw "Invalid transaction metadata."
+    }
+    if ($meta.state -eq "rolled_back") {
+        Write-Host "NOOP transaction already rolled back: $Identifier"
+        return
+    }
+    if (@("prepared", "validating", "applied") -notcontains [string]$meta.state) {
+        throw "Transaction is not rollback-eligible: $($meta.state)"
+    }
+
+    $fromPaths = Get-VersionPathMap ([string]$meta.from_version)
+    $toPaths = Get-VersionPathMap ([string]$meta.to_version)
+    $allowedTransactionPaths = @{}
+    foreach ($relative in @($fromPaths.Keys) + @($toPaths.Keys)) { $allowedTransactionPaths[$relative] = $true }
+    if ($meta.removed_files -isnot [System.Array]) { throw "Transaction removed_files must be an array." }
+    $expectedRemoved = @($fromPaths.Keys | Where-Object { -not $toPaths.ContainsKey($_) } | Sort-Object)
+    $actualRemoved = @($meta.removed_files | ForEach-Object { [string]$_ } | Sort-Object)
+    if (($expectedRemoved -join "`n") -cne ($actualRemoved -join "`n")) { throw "Transaction removed_files do not match version contracts." }
+    $decisions = New-Object System.Collections.Generic.List[object]
+    $appliedFilter = if ($null -ne $AppliedPaths) { @{} } else { $null }
+    if ($null -ne $appliedFilter) { foreach ($path in $AppliedPaths) { $appliedFilter[[string]$path] = $true } }
+    if ($meta.files -isnot [System.Array]) { throw "Transaction files must be an array." }
+    $recordPaths = @{}
+    foreach ($record in @($meta.files)) {
+        if (-not (Test-Property $record "path") -or -not $allowedTransactionPaths.ContainsKey([string]$record.path) -or $recordPaths.ContainsKey([string]$record.path)) {
+            throw "Transaction contains an invalid or duplicate managed path."
+        }
+        if ($record.changed -isnot [bool] -or $record.existed -isnot [bool]) { throw "Transaction changed/existed fields must be booleans: $($record.path)" }
+        $recordPaths[[string]$record.path] = $true
+        if (-not $record.changed) { continue }
+        if ($null -ne $appliedFilter -and -not $appliedFilter.ContainsKey([string]$record.path)) { continue }
+        $live = Resolve-TargetPath ([string]$record.path)
+        $liveItem = Get-Item -LiteralPath $live -Force -ErrorAction SilentlyContinue
+        if ($liveItem -and ($liveItem.PSIsContainer -or (($liveItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0))) {
+            throw "Rollback target is not a regular file: $($record.path)"
+        }
+        $currentHash = if ($liveItem) { Get-FileHashNormalized $live ([string]$record.path) } else { $null }
+        if ($currentHash -eq $record.applied_hash) {
+            $decisions.Add([pscustomobject]@{ Record = $record; Live = $live; Decision = "restore"; PreflightHash = $currentHash; BackupBytes = $null })
+        } elseif ($currentHash -eq $record.original_hash) {
+            $decisions.Add([pscustomobject]@{ Record = $record; Live = $live; Decision = "unchanged"; PreflightHash = $currentHash; BackupBytes = $null })
+        } else {
+            throw "Refusing rollback because a live file changed after apply: $($record.path)"
+        }
+    }
+    if ($recordPaths.Count -ne $allowedTransactionPaths.Count) { throw "Transaction file records do not match version contracts." }
+
+    if ($Automatic -and -not $ManifestWritten) {
+        $manifestDecision = "unchanged"
+        $manifestPreflightHash = $null
+    } else {
+        $manifestItem = Get-Item -LiteralPath $manifestPath -Force -ErrorAction SilentlyContinue
+        $manifestCurrent = if ($manifestItem -and -not $manifestItem.PSIsContainer) { Get-FileHashNormalized $manifestPath $manifestRelative } else { $null }
+        $manifestPreflightHash = $manifestCurrent
+        if ($manifestCurrent -eq $meta.new_manifest_hash) {
+            $manifestDecision = "restore"
+        } elseif ($manifestCurrent -eq $meta.old_manifest_hash) {
+            $manifestDecision = "unchanged"
+        } else {
+            throw "Refusing rollback because the manifest changed after apply (transaction=$Identifier manifest=$manifestPath current=$manifestCurrent expected=$($meta.new_manifest_hash))."
+        }
+    }
+
+    Write-Host "ROLLBACK PREFLIGHT $Identifier"
+    # Phase 1: authenticate every backup that could be consumed before restoring any live path.
+    foreach ($decision in $decisions) {
+        if ($decision.Decision -eq "unchanged") { continue }
+        $record = $decision.Record
+        if ($record.existed) {
+            $backup = Resolve-TargetPath "$controlRootName/transactions/$Identifier/backup/$($record.path)" -AllowControl
+            if (-not (Test-SafeFile $backup "backup for $($record.path)")) { throw "Backup is missing for $($record.path)" }
+            $bytes = [IO.File]::ReadAllBytes($backup)
+            $text = ConvertFrom-Utf8Bytes $bytes "backup for $($record.path)"
+            if ((Get-TextHash $text) -ne $record.original_hash) { throw "Backup hash mismatch for $($record.path)" }
+            $decision.BackupBytes = $bytes
+        }
+    }
+    $manifestBackupBytes = $null
+    if ($manifestDecision -eq "restore") {
+        if ($null -ne $meta.old_manifest_hash) {
+            $backupManifest = Resolve-TargetPath "$controlRootName/transactions/$Identifier/backup/$controlRootName/manifest.json" -AllowControl
+            if (-not (Test-SafeFile $backupManifest "manifest backup")) { throw "Manifest backup is missing." }
+            $manifestBackupBytes = [IO.File]::ReadAllBytes($backupManifest)
+            $text = ConvertFrom-Utf8Bytes $manifestBackupBytes "manifest backup"
+            if ((Get-TextHash $text) -ne $meta.old_manifest_hash) { throw "Manifest backup hash mismatch." }
+        }
+    }
+
+    foreach ($decision in $decisions) {
+        $liveItem = Get-Item -LiteralPath $decision.Live -Force -ErrorAction SilentlyContinue
+        if ($liveItem -and ($liveItem.PSIsContainer -or (($liveItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0))) { throw "Rollback target changed during preflight: $($decision.Record.path)" }
+        $currentHash = if ($liveItem) { Get-FileHashNormalized $decision.Live ([string]$decision.Record.path) } else { $null }
+        if ($currentHash -cne $decision.PreflightHash) { throw "Rollback target changed during preflight: $($decision.Record.path)" }
+    }
+    if (-not ($Automatic -and -not $ManifestWritten)) {
+        $manifestItem = Get-Item -LiteralPath $manifestPath -Force -ErrorAction SilentlyContinue
+        if ($manifestItem -and ($manifestItem.PSIsContainer -or (($manifestItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0))) { throw "Manifest changed during rollback preflight." }
+        $currentManifestHash = if ($manifestItem) { Get-FileHashNormalized $manifestPath $manifestRelative } else { $null }
+        if ($currentManifestHash -cne $manifestPreflightHash) { throw "Manifest changed during rollback preflight." }
+    }
+    if ((Get-FileHashNormalized $metaPath "transaction.json") -cne $metaPreflightHash) { throw "Transaction metadata changed during rollback preflight." }
+
+    # Phase 2: recheck each live precondition immediately before its restore.
+    foreach ($decision in $decisions) {
+        if ($decision.Decision -eq "unchanged") { continue }
+        $record = $decision.Record
+        $liveItem = Get-Item -LiteralPath $decision.Live -Force -ErrorAction SilentlyContinue
+        if ($liveItem -and ($liveItem.PSIsContainer -or (($liveItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0))) { throw "Rollback target changed after preflight: $($record.path)" }
+        $currentHash = if ($liveItem) { Get-FileHashNormalized $decision.Live ([string]$record.path) } else { $null }
+        if ($currentHash -cne $decision.PreflightHash) { throw "Rollback target changed after preflight: $($record.path)" }
+        if ($record.existed) {
+            Write-AtomicBytes $decision.Live $decision.BackupBytes
+        } elseif ($liveItem) {
+            Remove-Item -LiteralPath $decision.Live -Force
+            Remove-EmptyParents $decision.Live
+        }
+    }
+
+    if ($manifestDecision -eq "restore") {
+        $manifestItem = Get-Item -LiteralPath $manifestPath -Force -ErrorAction SilentlyContinue
+        if ($manifestItem -and ($manifestItem.PSIsContainer -or (($manifestItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0))) { throw "Manifest changed after rollback preflight." }
+        $currentManifestHash = if ($manifestItem) { Get-FileHashNormalized $manifestPath $manifestRelative } else { $null }
+        if ($currentManifestHash -cne $manifestPreflightHash) { throw "Manifest changed after rollback preflight." }
+        if ($null -eq $meta.old_manifest_hash) {
+            if ($manifestItem) { Remove-Item -LiteralPath $manifestPath -Force }
+        } else {
+            Write-AtomicBytes $manifestPath $manifestBackupBytes
+        }
+    }
+
+    $meta.state = "rolled_back"
+    $meta | Add-Member -NotePropertyName rolled_back_at_utc -NotePropertyValue ((Get-Date).ToUniversalTime().ToString("o")) -Force
+    $meta | Add-Member -NotePropertyName automatic_rollback -NotePropertyValue $Automatic -Force
+    Write-AtomicText $metaPath (($meta | ConvertTo-Json -Depth 20) + "`n")
+    Write-Host "ROLLED_BACK $Identifier"
+}
+
+if ($Rollback) {
+    if ($AdoptFrom -or $ProjectName) { throw "Rollback does not accept adoption or project-name options." }
+    $mutationLock = Enter-TransactionLock
+    try {
+        Invoke-TransactionRollback $Rollback
+        return 0
+    } finally {
+        Exit-TransactionLock $mutationLock
+    }
+}
+
+if ($ProjectName) {
+    $resolvedProjectName = Confirm-ProjectName $ProjectName
+} elseif ($null -ne $manifest) {
+    if (Test-Property $manifest "project_name") {
+        $resolvedProjectName = Confirm-ProjectName ([string]$manifest.project_name)
+    } elseif ((Test-Property $manifest "project") -and (Test-Property $manifest.project "name")) {
+        $resolvedProjectName = Confirm-ProjectName ([string]$manifest.project.name)
+    } else {
+        throw "Manifest project_name is missing."
+    }
+} else {
+    $workflowPath = Resolve-TargetPath ".agents/workflow.json"
+    if (Test-Path -LiteralPath $workflowPath -PathType Leaf) {
+        $workflow = Read-JsonFile $workflowPath ".agents/workflow.json"
+        if ((Test-Property $workflow "project") -and (Test-Property $workflow.project "name") -and $workflow.project.name -ne "<PROJECT_NAME>") {
+            $resolvedProjectName = Confirm-ProjectName ([string]$workflow.project.name)
+        }
+    }
+    if (-not $resolvedProjectName) { $resolvedProjectName = Confirm-ProjectName (Split-Path -Leaf $targetRoot) }
+}
+
+$installedVersion = if ($null -eq $manifest) { $AdoptFrom } else { [string]$manifest.workflow_version }
+if ([string]::IsNullOrWhiteSpace($installedVersion)) { throw "Manifest workflow_version is missing." }
+$introduced = @{}
+$removed = @{}
+$oldEntries = @()
+$oldSeen = @{}
+if($installedVersion-ne$newVersion){$baselineContract=Get-BaselineContract $installedVersion;$oldEntries=@($baselineContract.Entries);foreach($oldEntry in $oldEntries){$oldSeen[[string]$oldEntry.path]=$oldEntry};foreach($relative in $seen.Keys){if(-not$oldSeen.ContainsKey($relative)){$introduced[$relative]=$true}};foreach($relative in $oldSeen.Keys){if(-not$seen.ContainsKey($relative)){$removed[$relative]=$oldSeen[$relative]}}}else{$oldEntries=$entries;foreach($entry in $entries){$oldSeen[[string]$entry.path]=$entry}}
+
+$manifestEntries = @{}
+if ($null -ne $manifest) {
+    $rawEntries = if (Test-Property $manifest "files") { @($manifest.files) } elseif (Test-Property $manifest "managed_files") { @($manifest.managed_files) } else { @() }
+    foreach ($item in $rawEntries) {
+        if ((Test-Property $item "path") -and -not [string]::IsNullOrWhiteSpace([string]$item.path)) {
+            if ($manifestEntries.ContainsKey([string]$item.path)) { throw "Manifest contains a duplicate path: $($item.path)" }
+            $manifestEntries[[string]$item.path] = $item
+        }
+    }
+    $expectedManifestPaths = @($oldSeen.Keys)
+    if ($manifestEntries.Count -ne $expectedManifestPaths.Count) { throw "Manifest managed paths do not match managed-files.json." }
+    foreach ($relative in $expectedManifestPaths) {
+        if (-not $manifestEntries.ContainsKey($relative)) { throw "Manifest managed paths do not match managed-files.json." }
+        $recordedHash = [string]$manifestEntries[$relative].baseline_hash
+        if ($recordedHash -notmatch '^sha256:[0-9a-f]{64}$') { throw "Manifest baseline_hash is missing or invalid for $relative" }
+        $contractEntry = $oldSeen[$relative]
+        if ([string]$manifestEntries[$relative].source -cne [string]$contractEntry.source -or
+            [string]$manifestEntries[$relative].policy -cne [string]$contractEntry.policy) {
+            throw "Manifest source or policy does not match managed-files.json for $relative"
+        }
+        if ($installedVersion -ne $newVersion) {
+            $baselinePath = Resolve-PluginPath "baselines/$installedVersion/$relative" "baseline $relative"
+            $baselineText = Render-Template (Read-NormalizedText $baselinePath "baseline $relative") ([string]$contractEntry.render) $resolvedProjectName
+            if ($recordedHash -cne (Get-TextHash $baselineText)) { throw "Manifest baseline hash does not match the immutable baseline for $relative" }
+        }
+    }
+}
+
+$plans = New-Object System.Collections.Generic.List[object]
+foreach ($entry in $entries) {
+    $relative = [string]$entry.path
+    $live = Resolve-TargetPath $relative
+    $liveItem = Get-Item -LiteralPath $live -Force -ErrorAction SilentlyContinue
+    if ($liveItem -and ($liveItem.PSIsContainer -or (($liveItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0))) {
+        throw "Managed target is not a regular file: $relative"
+    }
+    $sourcePath = Resolve-PluginPath ([string]$entry.source) "managed source"
+    $newText = Render-Template (Read-NormalizedText $sourcePath ([string]$entry.source)) ([string]$entry.render) $resolvedProjectName
+    $newHash = Get-TextHash $newText
+    if ($installedVersion -eq $newVersion) {
+        $baseText = $newText
+    } elseif ($introduced.ContainsKey($relative)) {
+        $baseText = $null
+    } else {
+        $baselinePath = Resolve-PluginPath "baselines/$installedVersion/$relative" "baseline $relative"
+        $oldEntry = $oldSeen[$relative]
+        $baseText = Render-Template (Read-NormalizedText $baselinePath "baseline $relative") ([string]$oldEntry.render) $resolvedProjectName
+    }
+    $baseHash = if ($null -ne $baseText) { Get-TextHash $baseText } else { $null }
+    if ($manifestEntries.ContainsKey($relative) -and (Test-Property $manifestEntries[$relative] "baseline_hash")) {
+        if ($manifestEntries[$relative].baseline_hash -ne $baseHash) { throw "Manifest baseline hash does not match the immutable baseline for $relative" }
+    }
+    $liveText = if ($liveItem) { Read-NormalizedText $live $relative } else { $null }
+    $liveHash = if ($null -ne $liveText) { Get-TextHash $liveText } else { $null }
+    $appliedText = $liveText
+    if ($null -eq $liveText) {
+        $action = "CREATE"
+        $appliedText = $newText
+    } elseif ($null -eq $baseText) {
+        $action = if ($liveHash -eq $newHash) { "NOOP" } else { "CONFLICT" }
+    } elseif ($entry.policy -eq "seed_once") {
+        $action = if ($liveHash -eq $newHash) { "NOOP" } else { "PRESERVE" }
+    } elseif ($liveHash -eq $newHash) {
+        $action = "NOOP"
+    } elseif ($liveHash -eq $baseHash) {
+        $action = "REPLACE"
+        $appliedText = $newText
+    } elseif ($baseHash -eq $newHash) {
+        $action = "PRESERVE"
+    } elseif ($entry.conflict_resolution -eq "upstream_wins") {
+        $action = "UPSTREAM"
+        $appliedText = $newText
+    } elseif ($entry.conflict_resolution -eq "preserve_markdown_sections") {
+        $action = "MERGE"
+        $appliedText = Merge-ProtectedMarkdownSections $liveText $newText @($entry.preserve_sections) $relative
+    } elseif ($entry.conflict_resolution -eq "preserve") {
+        $action = "PRESERVE"
+    } else {
+        $action = "CONFLICT"
+    }
+    $plans.Add([pscustomobject]@{
+        Path = $relative; Source = [string]$entry.source; Policy = [string]$entry.policy
+        Ownership = [string]$entry.ownership; ConflictResolution = [string]$entry.conflict_resolution; Action = $action
+        BaseHash = $baseHash; LiveHash = $liveHash; NewHash = $newHash
+        BaseText = $baseText; LiveText = $liveText; NewText = $newText; AppliedText = $appliedText
+    })
+}
+foreach ($relative in @($removed.Keys | Sort-Object)) {
+    $entry = $removed[$relative]
+    $live = Resolve-TargetPath $relative
+    $liveItem = Get-Item -LiteralPath $live -Force -ErrorAction SilentlyContinue
+    if ($liveItem -and ($liveItem.PSIsContainer -or (($liveItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0))) {
+        throw "Retired target is not a regular file: $relative"
+    }
+    $baselinePath = Resolve-PluginPath "baselines/$installedVersion/$relative" "removed-file baseline"
+    $baseText = Render-Template (Read-NormalizedText $baselinePath "removed-file baseline $relative") ([string]$entry.render) $resolvedProjectName
+    $baseHash = Get-TextHash $baseText
+    $liveText = if ($liveItem) { Read-NormalizedText $live $relative } else { $null }
+    $liveHash = if ($null -ne $liveText) { Get-TextHash $liveText } else { $null }
+    $plans.Add([pscustomobject]@{
+        Path = $relative; Source = [string]$entry.source; Policy = [string]$entry.policy
+        Ownership = "plugin"; ConflictResolution = "retire"; Action = if ($liveItem) { "DELETE" } else { "REMOVE_NOOP" }
+        BaseHash = $baseHash; LiveHash = $liveHash; NewHash = $null
+        BaseText = $baseText; LiveText = $liveText; NewText = $null; AppliedText = $null; IsRemoved = $true
+    })
+}
+
+$acceptedLocalPaths = @{}
+foreach ($rawPath in $AcceptLocal) {
+    $relative = [string]$rawPath
+    if (-not (Test-SafeRelative $relative)) { throw "Unsafe -AcceptLocal path: $relative" }
+    if ($acceptedLocalPaths.ContainsKey($relative)) { throw "Duplicate -AcceptLocal path: $relative" }
+    $acceptedLocalPaths[$relative] = $true
+    $matchingPlans = @($plans | Where-Object { $_.Path -ceq $relative })
+    if ($matchingPlans.Count -ne 1) { throw "-AcceptLocal path is not managed: $relative" }
+    if ($matchingPlans[0].Action -cne "CONFLICT") { throw "-AcceptLocal is valid only for a current conflict: $relative" }
+    $matchingPlans[0].Action = "ACCEPT"
+    $matchingPlans[0].AppliedText = $matchingPlans[0].LiveText
+}
+
+Write-Host "UPGRADE $installedVersion -> $newVersion"
+Write-Host "TARGET $targetRoot"
+foreach ($item in $plans) { Write-Host (("{0,-8} {1,-22} {2}" -f $item.Action, $item.Policy, $item.Path)) }
+$conflicts = @($plans | Where-Object { $_.Action -eq "CONFLICT" })
+$changes = @($plans | Where-Object { @("CREATE", "REPLACE", "UPSTREAM", "MERGE", "DELETE") -contains $_.Action })
+if ($Apply) {
+    foreach ($item in $plans) {
+        Get-VerifiedManagedSnapshot $item "after planning" | Out-Null
+    }
+    Get-VerifiedManifestSnapshot $plannedManifestHash "after planning" | Out-Null
+}
+if (-not $Apply) {
+    Write-Host "PLAN changes=$($changes.Count) conflicts=$($conflicts.Count)"
+    return 0
+}
+
+$mutationLock = Enter-TransactionLock
+try {
+foreach ($item in $plans) { Get-VerifiedManagedSnapshot $item "after lock acquisition" | Out-Null }
+Get-VerifiedManifestSnapshot $plannedManifestHash "after lock acquisition" | Out-Null
+
+if ($conflicts.Count -gt 0) {
+    $identifier = New-TransactionId
+    $staging = Resolve-TargetPath "$controlRootName/staging/$identifier" -AllowControl
+    if (Test-Path -LiteralPath $staging) { throw "Staging transaction already exists: $identifier" }
+    Ensure-SafeDirectory $staging
+    $publicConflicts = @($conflicts | ForEach-Object {
+        [pscustomobject]@{ path = $_.Path; policy = $_.Policy; ownership = $_.Ownership; conflict_resolution = $_.ConflictResolution; base_hash = $_.BaseHash; live_hash = $_.LiveHash; new_hash = $_.NewHash }
+    })
+    $publicPlan = [ordered]@{ schema_version = 1; transaction_id = $identifier; from_version = $installedVersion; to_version = $newVersion; conflicts = $publicConflicts }
+    Write-AtomicText (Join-Path $staging "plan.json") (($publicPlan | ConvertTo-Json -Depth 20) + "`n")
+    foreach ($item in $conflicts) {
+        $bundle = Join-Path (Join-Path $staging "conflicts") ($item.Path.Replace('/', [System.IO.Path]::DirectorySeparatorChar))
+        Ensure-SafeDirectory $bundle
+        if ($null -ne $item.BaseText) { Write-AtomicText (Join-Path $bundle "base") $item.BaseText }
+        if ($null -ne $item.LiveText) { Write-AtomicText (Join-Path $bundle "local") $item.LiveText }
+        Write-AtomicText (Join-Path $bundle "upstream") $item.NewText
+    }
+    Write-Error "Conflicts staged at $(Join-Path $staging 'conflicts'); live managed files and manifest were not changed." -ErrorAction Continue
+    return 4
+}
+
+if ($changes.Count -eq 0 -and $installedVersion -eq $newVersion -and $null -ne $manifest) {
+    if(-not(Invoke-Validation -Target $targetRoot)){throw "Current installation failed validation; refusing NOOP."}
+    Write-Host "NOOP already up to date"
+    return 0
+}
+
+$identifier = New-TransactionId
+$transactionRoot = Resolve-TransactionRoot $identifier
+if (Test-Path -LiteralPath $transactionRoot) { throw "Transaction already exists: $identifier" }
+$backupRoot = Join-Path $transactionRoot "backup"
+Ensure-SafeDirectory $backupRoot
+$records = New-Object System.Collections.Generic.List[object]
+foreach ($item in $plans) {
+    $snapshot = Get-VerifiedManagedSnapshot $item "during backup"
+    $exists = $snapshot.Exists
+    $changed = @("CREATE", "REPLACE", "UPSTREAM", "MERGE", "DELETE") -contains $item.Action
+    $records.Add([pscustomobject]@{
+        path = $item.Path; existed = $exists; changed = $changed; original_hash = $item.LiveHash
+        applied_hash = if ($item.Action -eq "DELETE") { $null } elseif ($changed) { Get-TextHash $item.AppliedText } else { $item.LiveHash }
+        resolution = $item.Action
+    })
+    if ($exists) {
+        $backup = Join-Path $backupRoot ($item.Path.Replace('/', [System.IO.Path]::DirectorySeparatorChar))
+        Ensure-SafeDirectory (Split-Path -Parent $backup)
+        Write-AtomicBytes $backup $snapshot.Bytes
+    }
+}
+
+$manifestSnapshot = Get-VerifiedManifestSnapshot $plannedManifestHash "during backup"
+$oldManifestText = $manifestSnapshot.Text
+$oldManifestHash = $manifestSnapshot.Hash
+if ($null -ne $oldManifestText) {
+    $backupManifest = Join-Path $backupRoot "$controlRootName/manifest.json"
+    Ensure-SafeDirectory (Split-Path -Parent $backupManifest)
+    Write-AtomicBytes $backupManifest $manifestSnapshot.Bytes
+}
+
+$now = (Get-Date).ToUniversalTime().ToString("o")
+$manifestFiles = @($plans | Where-Object { -not $_.IsRemoved } | ForEach-Object {
+    [ordered]@{ path = $_.Path; source = $_.Source; policy = $_.Policy; baseline_hash = $_.NewHash }
+})
+$newManifest = [ordered]@{
+    schema_version = 1; workflow_version = $newVersion; project_name = $resolvedProjectName
+    installed_at_utc = $now; last_transaction = $identifier; files = $manifestFiles
+}
+$newManifestText = (($newManifest | ConvertTo-Json -Depth 20) + "`n").Replace("`r`n", "`n").Replace("`r", "`n")
+$meta = [ordered]@{
+    schema_version = 1; transaction_id = $identifier; target = $targetRoot
+    from_version = $installedVersion; to_version = $newVersion; state = "prepared"; created_at_utc = $now
+    old_manifest_hash = $oldManifestHash; new_manifest_hash = (Get-TextHash $newManifestText)
+    accepted_local = @($acceptedLocalPaths.Keys | Sort-Object)
+    upstream_resolved = @($plans | Where-Object { $_.Action -eq "UPSTREAM" } | ForEach-Object { $_.Path } | Sort-Object)
+    merged = @($plans | Where-Object { $_.Action -eq "MERGE" } | ForEach-Object { $_.Path } | Sort-Object)
+    removed_files = @($removed.Keys | Sort-Object)
+    files = $records.ToArray()
+}
+$metaPath = Join-Path $transactionRoot "transaction.json"
+Write-AtomicText $metaPath (($meta | ConvertTo-Json -Depth 20) + "`n")
+
+$appliedPaths = [Collections.Generic.List[string]]::new()
+$manifestWritten = $false
+try {
+    foreach ($item in $plans) { Get-VerifiedManagedSnapshot $item "after transaction preparation" | Out-Null }
+    Get-VerifiedManifestSnapshot $plannedManifestHash "after transaction preparation" | Out-Null
+    foreach ($item in $changes) {
+        $snapshot = Get-VerifiedManagedSnapshot $item "immediately before write"
+        $destination = $snapshot.Path
+        if ($item.Action -eq "DELETE") {
+            Remove-Item -LiteralPath $destination -Force
+            Remove-EmptyParents $destination
+        } else {
+            Write-AtomicText $destination $item.AppliedText
+        }
+        $appliedPaths.Add([string]$item.Path)
+    }
+    Get-VerifiedManifestSnapshot $plannedManifestHash "immediately before manifest write" | Out-Null
+    Write-AtomicText $manifestPath $newManifestText
+    $manifestWritten = $true
+    $writtenManifestHash = Get-FileHashNormalized $manifestPath $manifestRelative
+    if ($writtenManifestHash -ne $meta.new_manifest_hash) {
+        throw "Written manifest hash mismatch (current=$writtenManifestHash expected=$($meta.new_manifest_hash))."
+    }
+    $meta["state"] = "validating"
+    Write-AtomicText $metaPath (($meta | ConvertTo-Json -Depth 20) + "`n")
+    if(-not(Invoke-Validation -Target $targetRoot)){throw "Post-upgrade validation failed."}
+    $meta["state"] = "applied"
+    $meta["validated_at_utc"] = (Get-Date).ToUniversalTime().ToString("o")
+    Write-AtomicText $metaPath (($meta | ConvertTo-Json -Depth 20) + "`n")
+} catch {
+    $applyError = $_.Exception.Message
+    Write-Error "Apply failed; attempting automatic rollback: $applyError" -ErrorAction Continue
+    try {
+        if ($appliedPaths.Count -eq 0 -and -not $manifestWritten) {
+            Remove-PreparedTransaction $identifier
+        } else {
+            Invoke-TransactionRollback -Identifier $identifier -Automatic $true -AppliedPaths $appliedPaths.ToArray() -ManifestWritten $manifestWritten
+        }
+    } catch {
+        throw "Apply failed ($applyError) and automatic rollback also failed: $($_.Exception.Message)"
+    }
+    return 5
+}
+
+Write-Host "APPLIED $identifier"
+Write-Host "VALIDATION passed"
+return 0
+} finally {
+    Exit-TransactionLock $mutationLock
+}
+}
+
+function Invoke-Validation {
+    [CmdletBinding()]
+    param([string]$Target = ".", [switch]$AllowPlaceholders)
+$errors = [Collections.Generic.List[string]]::new()
+Set-FlowContext $Target
+$pluginRoot=$script:PluginRoot
+$targetRoot=$script:FlowContext.TargetRoot
+function Fail([string]$m){$errors.Add($m)}
+function Json([string]$p,[string]$n){try{Read-JsonFile $p $n}catch{Fail $_.Exception.Message;$null}}
+function Text([string]$p){Read-NormalizedText $p $p}
+function Hash([string]$s){Get-TextHash $s}
+function Render([string]$s,[string]$m,[string]$n){Render-Template $s $m $n}
+function Eq($a,$b,[string]$n){if($a-is[Array]-or$b-is[Array]){if((@($a)-join"`n")-cne(@($b)-join"`n")){Fail "$n invalid"}}elseif($a-cne$b){Fail "$n must be $b"}}
+$contract=Get-CurrentManagedContract
+$version=$contract.Version
+$managed=$contract.Managed
+$plugin=Json (Join-Path $pluginRoot .codex-plugin/plugin.json) plugin.json
+if(([string]$plugin.version)-cne$version-and-not([string]$plugin.version).StartsWith("$version+codex.")){Fail "plugin version invalid"}
+
+$paths=@("AGENTS.md",".agents/workflow.json",".agents/WORKFLOW_PROTOCOL.md",".agents/skills/project-workflow-manager/SKILL.md",".agents/skills/project-workflow-manager/agents/openai.yaml","docs/PROJECT_STATE.md")
+$entries=@($contract.Entries);Eq @($entries.path) $paths managed-paths;$seen=$contract.Seen
+
+$historical=[Collections.Generic.HashSet[string]]::new()
+foreach($dir in Get-ChildItem -LiteralPath(Join-Path $pluginRoot baselines)-Directory){try{$baseline=Get-BaselineContract $dir.Name;foreach($e in $baseline.Entries){[void]$historical.Add([string]$e.path)};$actual=@(Get-ChildItem $dir.FullName -Recurse -File|ForEach-Object{$_.FullName.Substring($dir.FullName.Length+1).Replace('\','/')}|Where-Object{$_-ne'managed-files.json'}|Sort-Object);Eq $actual @($baseline.Seen.Keys|Sort-Object) "baseline tree $($dir.Name)"}catch{Fail $_.Exception.Message}}
+
+$wp=Join-Path $targetRoot .agents/workflow.json;$w=if(Test-Path -LiteralPath $wp -PathType Leaf){Json $wp workflow}else{Fail "missing workflow";$null}
+if($null-ne$w){Eq @($w.paths.PSObject.Properties.Name|Sort-Object) @("project_state","workflow_protocol") path-fields;Eq @($w.tasks.PSObject.Properties.Name|Sort-Object) @("blocked_waiting_queued_occupy_slot","hidden_subagents_may_substitute","hub_occupies_slot","management_failure","max_active","visible_execution_required") task-fields;Eq @($w.execution.PSObject.Properties.Name|Sort-Object) @("parallel","serial") execution-fields;Eq @($w.rotation.PSObject.Properties.Name|Sort-Object) @("key","latest_turn","review_turn") rotation-fields;Eq @($w.upgrade.PSObject.Properties.Name|Sort-Object) @("attempt_deadline_seconds","barrier","coordinator_claim","discovery","hub_handshake","observe","protocol","reconcile","recovery","successor_key","task_handshake","transaction_key","transaction_task_role","zero_active_fast_path") upgrade-fields;Eq @($w.upgrade.discovery.PSObject.Properties.Name|Sort-Object) @("fallback","history","listing") discovery-fields;Eq @($w.upgrade.reconcile.PSObject.Properties.Name|Sort-Object) @("independent_pairs","pair_order") reconcile-fields;Eq @($w.upgrade.barrier.PSObject.Properties.Name|Sort-Object) @("active","cancelled","provisional","released") barrier-fields;Eq @($w.upgrade.observe.PSObject.Properties.Name|Sort-Object) @("include_outputs","poll_delays_seconds","poll_scan_latest_turns","stable_terminal_snapshots") observe-fields;Eq @($w.upgrade.recovery.PSObject.Properties.Name|Sort-Object) @("compensating_successors","hub_followups","successor_followups") recovery-fields}
+if($null-ne$w){Eq([int]$w.schema_version)6 workflow-schema;Eq @($w.PSObject.Properties.Name|Sort-Object) @("execution","paths","project","rotation","schema_version","tasks","upgrade") workflow-fields;Eq([string]$w.paths.project_state)"docs/PROJECT_STATE.md" project-state;Eq([string]$w.paths.workflow_protocol)".agents/WORKFLOW_PROTOCOL.md" workflow-protocol;Eq([int]$w.tasks.max_active)5 max-active;Eq([bool]$w.tasks.hub_occupies_slot)$false hub-slot;Eq([bool]$w.tasks.blocked_waiting_queued_occupy_slot)$true blocked-slot;Eq([bool]$w.tasks.visible_execution_required)$true visible-task;Eq([bool]$w.tasks.hidden_subagents_may_substitute)$false hidden-task;Eq([string]$w.tasks.management_failure)"stop" management-failure;Eq @($w.execution.parallel) @("non_conflicting") execution-parallel;Eq @($w.execution.serial) @("high_risk","external") execution-serial;Eq([int]$w.rotation.review_turn)6 review-turn;Eq([int]$w.rotation.latest_turn)10 latest-turn;Eq([string]$w.rotation.key)"[codex-project-flow:execution:v1] projectId=<exactProjectId>; hubThreadId=<exactHubThreadId>; predecessorThreadId=<exactPredecessorThreadId>; generation=<positiveInteger>" rotation-key;Eq([int]$w.upgrade.protocol)2 upgrade-protocol;Eq([string]$w.upgrade.transaction_task_role)"visible_coordinator_executor" transaction-task-role;Eq([string]$w.upgrade.discovery.listing)"exhaustive_metadata" discovery-listing;Eq([string]$w.upgrade.discovery.history)"targeted" discovery-history;Eq([string]$w.upgrade.discovery.fallback)"full_on_ambiguity" discovery-fallback;if($w.upgrade.zero_active_fast_path-isnot[bool]){Fail "zero-active-fast-path must be boolean"}else{Eq $w.upgrade.zero_active_fast_path $true zero-active-fast-path};Eq([string]$w.upgrade.reconcile.independent_pairs)"parallel_within_available_slots" reconcile-independent-pairs;Eq @($w.upgrade.reconcile.pair_order) @("archive_predecessor","create_successor","verify_handshake") reconcile-pair-order;Eq([string]$w.upgrade.barrier.provisional)"[codex-project-flow:upgrade-barrier:v1] state=provisional; projectId=<exactProjectId>; mode=<exactMode>; sourceVersion=<exactSourceVersion>; targetVersion=<exactTargetVersion>; claimId=<exactClaimId>" provisional-barrier;Eq([string]$w.upgrade.barrier.active)"[codex-project-flow:upgrade-barrier:v1] state=active; projectId=<exactProjectId>; coordinatorThreadId=<exactCoordinatorThreadId>; sourceVersion=<exactSourceVersion>; targetVersion=<exactTargetVersion>; generation=<positiveInteger>" active-barrier;Eq([string]$w.upgrade.barrier.released)"[codex-project-flow:upgrade-barrier:v1] state=released; projectId=<exactProjectId>; coordinatorThreadId=<exactCoordinatorThreadId>; sourceVersion=<exactSourceVersion>; targetVersion=<exactTargetVersion>; generation=<positiveInteger>" released-barrier;Eq([string]$w.upgrade.barrier.cancelled)"[codex-project-flow:upgrade-barrier:v1] state=cancelled; projectId=<exactProjectId>; mode=<exactMode>; sourceVersion=<exactSourceVersion>; targetVersion=<exactTargetVersion>; claimId=<exactClaimId>" cancelled-barrier;Eq([string]$w.upgrade.coordinator_claim)"[codex-project-flow:upgrade-claim:v1] projectId=<exactProjectId>; targetVersion=<exactTargetVersion>; claimId=<exactClaimId>" coordinator-claim;Eq([string]$w.upgrade.transaction_key)"[codex-project-flow:upgrade:v1] projectId=<exactProjectId>; coordinatorThreadId=<exactCoordinatorThreadId>; sourceVersion=<exactSourceVersion>; targetVersion=<exactTargetVersion>; generation=<positiveInteger>" transaction-key;Eq([string]$w.upgrade.successor_key)"[codex-project-flow:execution:v2] projectId=<exactProjectId>; hubThreadId=<exactHubThreadId>; predecessorThreadId=<exactPredecessorThreadId>; generation=<positiveInteger>; workflowVersion=<exactWorkflowVersion>; upgradeTransaction=<exactUpgradeTransaction>" successor-key;Eq([string]$w.upgrade.task_handshake)"[codex-project-flow:handshake:v1] projectId=<exactProjectId>; hubThreadId=<exactHubThreadId>; workflowVersion=<exactWorkflowVersion>; upgradeTransaction=<exactUpgradeTransaction>; generation=<positiveInteger>" task-handshake;Eq([string]$w.upgrade.hub_handshake)"[codex-project-flow:hub-handshake:v1] projectId=<exactProjectId>; hubThreadId=<exactHubThreadId>; workflowVersion=<exactWorkflowVersion>; upgradeTransaction=<exactUpgradeTransaction>" hub-handshake;Eq([int]$w.upgrade.observe.poll_scan_latest_turns)3 poll-turns;Eq([bool]$w.upgrade.observe.include_outputs)$false include-outputs;Eq([int]$w.upgrade.observe.stable_terminal_snapshots)3 stable;Eq @($w.upgrade.observe.poll_delays_seconds)@(1,2) delays;Eq([int]$w.upgrade.recovery.hub_followups)1 hub-followups;Eq([int]$w.upgrade.recovery.successor_followups)1 successor-followups;Eq([int]$w.upgrade.recovery.compensating_successors)1 compensation;Eq([int]$w.upgrade.attempt_deadline_seconds)60 deadline;if(-not$AllowPlaceholders-and[string]$w.project.name-eq"<PROJECT_NAME>"){Fail "placeholder not rendered"}}
+
+$skillFiles=@(Get-ChildItem -LiteralPath(Join-Path $pluginRoot skills)-Recurse -File|ForEach-Object{$_.FullName.Substring((Join-Path $pluginRoot skills).Length+1).Replace('\','/')}|Sort-Object)
+$expectedSkills=@("bootstrap-project-flow/SKILL.md","bootstrap-project-flow/agents/openai.yaml","upgrade-project-flow/SKILL.md","upgrade-project-flow/agents/openai.yaml","upgrade-project-flow/references/coordination.md","upgrade-project-flow/references/file-transaction.md")|Sort-Object
+Eq $skillFiles $expectedSkills skill-files
+
+$bad='任务管理(能力)?不可用时.{0,20}(回到|回退到)中枢|continue_in_hub|hub_execution_allowed|"hidden_subagents"\s*:\s*"may_substitute"|"(max_active_tasks|max_active)"\s*:\s*1'
+foreach($r in @("AGENTS.md",".agents","docs")){$p=Join-Path $targetRoot $r;$fs=if(Test-Path $p -PathType Leaf){@(Get-Item $p)}elseif(Test-Path $p -PathType Container){@(Get-ChildItem $p -Recurse -File|Where-Object Extension -in @(".md",".json"))}else{@()};foreach($f in $fs){if((Text $f.FullName)-match$bad){Fail "conflicting rule $($f.FullName)"}}}
+
+$mp=Join-Path $targetRoot .project-flow/manifest.json
+if(Test-Path $mp -PathType Leaf){$mi=Json $mp manifest;if($null-ne$mi){Eq([int]$mi.schema_version)1 manifest-schema;Eq([string]$mi.workflow_version)$version manifest-version;Eq @($mi.files.path)$paths manifest-paths;$name=[string]$mi.project_name;if([string]::IsNullOrWhiteSpace($name)-or$name-eq"<PROJECT_NAME>"){Fail "bad project name"};foreach($e in $entries){$r=@($mi.files|Where-Object path -ceq $e.path);if($r.Count-ne1){continue};if($r[0].source-cne$e.source-or$r[0].policy-cne$e.policy){Fail "manifest metadata $($e.path)"};$expected=Hash(Render(Text(Join-Path $pluginRoot([string]$e.source)))([string]$e.render)$name);if($r[0].baseline_hash-cne$expected){Fail "manifest hash $($e.path)"};if(-not(Test-Path -LiteralPath(Join-Path $targetRoot([string]$e.path))-PathType Leaf)){Fail "missing installed $($e.path)"}};foreach($r in $historical){if(-not$seen.ContainsKey($r)-and(Test-Path -LiteralPath(Join-Path $targetRoot $r))){Fail "retired file remains $r"}}}}
+
+if($errors.Count){$errors|ForEach-Object{Write-Error $_ -ErrorAction Continue};return $false};Write-Host "Validation passed for $targetRoot";return $true
+}
+
+function Invoke-Rollback {
+    [CmdletBinding()]
+    param([string]$Target = ".", [Parameter(Mandatory)][string]$TransactionId)
+    return Invoke-Upgrade -Target $Target -Rollback $TransactionId
+}
+
+try{$code=switch($Command){"install"{Invoke-Install -Target $Target -ProjectName $ProjectName -Force:$Force -DryRun:$DryRun}"upgrade"{Invoke-Upgrade -Target $Target -Plan:$Plan -Apply:$Apply -Rollback $Rollback -AdoptFrom $AdoptFrom -ProjectName $ProjectName -AcceptLocal $AcceptLocal}"plan"{Invoke-Upgrade -Target $Target -Plan -AdoptFrom $AdoptFrom -ProjectName $ProjectName}"apply"{Invoke-Upgrade -Target $Target -Apply -AdoptFrom $AdoptFrom -ProjectName $ProjectName -AcceptLocal $AcceptLocal}"rollback"{if([string]::IsNullOrWhiteSpace($Rollback)){throw "rollback command requires -Rollback <transaction-id>"};Invoke-Rollback -Target $Target -TransactionId $Rollback}"validate"{if(Invoke-Validation -Target $Target -AllowPlaceholders:$AllowPlaceholders){0}else{1}}};if($null-eq$code){$code=0};exit([int]$code)}catch{Write-Error $_ -ErrorAction Continue;exit 1}
