@@ -1,0 +1,93 @@
+{
+  "schema_version": 8,
+  "project": { "name": "<PROJECT_NAME>" },
+  "paths": {
+    "project_state": "docs/PROJECT_STATE.md",
+    "workflow_protocol": ".agents/WORKFLOW_PROTOCOL.md"
+  },
+  "tasks": {
+    "max_active": 1,
+    "hub_occupies_slot": false,
+    "blocked_waiting_queued_occupy_slot": true,
+    "visible_execution_required": true,
+    "hidden_subagents_may_substitute": false,
+    "management_failure": "stop",
+    "request_key": "[codex-project-flow:request:v1] projectId=<exactProjectId>; hubThreadId=<exactHubThreadId>; requestId=<exactRequestId>; generation=1"
+  },
+  "execution": {
+    "same_task_actions": ["inspect", "modify", "build", "test", "self_check", "evidence", "documentation", "commit", "push", "external"],
+    "supplemental_authorization": "continue_original_task",
+    "different_goal": "queue_until_active_task_completes",
+    "scope_change": "pause_for_hub_confirmation_then_continue_original_task",
+    "replacement": "explicit_user_authorization",
+    "serial": ["all_visible_execution"]
+  },
+  "documents": {
+    "default_extension": ".md",
+    "standalone_cover": false,
+    "first_heading": "#",
+    "heading_progression": "no_skipped_levels",
+    "body_structures": ["paragraphs", "lists", "tables", "code_blocks"],
+    "validation_scope": "created_or_updated_delivery_documents"
+  },
+  "bootstrap": {
+    "registry_path": ".project-flow/hub.json",
+    "lock_path": ".project-flow/bootstrap.lock",
+    "registry_schema": 1,
+    "lock_schema": 1,
+    "stale_after_seconds": 300,
+    "fast_path": "registry_targeted_read",
+    "recovery_path": "exhaustive_metadata_on_exception",
+    "title_identity": "saved_project_binding_plus_mutation_thread",
+    "unarchive": "only_when_explicitly_archived",
+    "lock_acquire": "atomic_create_new",
+    "lock_inspect": "validated_read_only",
+    "existing_lock": "inspect_then_recover_or_stop",
+    "lock_release": "owner_claim_only",
+    "stale_recovery": "exact_token_cas_same_thread_or_install_orphan",
+    "claim_title": "[cpf-claim] <shortClaimId>"
+  },
+  "rotation": {
+    "mode": "explicit_user_authorization_only",
+    "key": "[codex-project-flow:execution:v3] projectId=<exactProjectId>; hubThreadId=<exactHubThreadId>; requestId=<exactRequestId>; predecessorThreadId=<exactPredecessorThreadId>; generation=<positiveInteger>"
+  },
+  "upgrade": {
+    "protocol": 3,
+    "transaction_task_role": "visible_coordinator_executor",
+    "request_key": "[codex-project-flow:upgrade-request:v1] projectId=<exactProjectId>; hubThreadId=<exactHubThreadId>; requestId=<exactRequestId>; mode=<exactMode>; sourceVersion=<exactSourceVersion>; targetVersion=<exactTargetVersion>",
+    "discovery": {
+      "listing": "exhaustive_metadata",
+      "history": "targeted",
+      "fallback": "full_on_ambiguity"
+    },
+    "zero_active_fast_path": true,
+    "reconcile": {
+      "active_snapshot": "explicit_replacement_authorization_required",
+      "successor_creation": "hub_serial_after_transaction",
+      "pair_order": ["authorize_replacement", "archive_predecessor", "queue_successor"]
+    },
+    "barrier": {
+      "provisional": "[codex-project-flow:upgrade-barrier:v1] state=provisional; projectId=<exactProjectId>; mode=<exactMode>; sourceVersion=<exactSourceVersion>; targetVersion=<exactTargetVersion>; claimId=<exactClaimId>",
+      "active": "[codex-project-flow:upgrade-barrier:v1] state=active; projectId=<exactProjectId>; coordinatorThreadId=<exactCoordinatorThreadId>; sourceVersion=<exactSourceVersion>; targetVersion=<exactTargetVersion>; generation=<positiveInteger>",
+      "released": "[codex-project-flow:upgrade-barrier:v1] state=released; projectId=<exactProjectId>; coordinatorThreadId=<exactCoordinatorThreadId>; sourceVersion=<exactSourceVersion>; targetVersion=<exactTargetVersion>; generation=<positiveInteger>",
+      "cancelled": "[codex-project-flow:upgrade-barrier:v1] state=cancelled; projectId=<exactProjectId>; mode=<exactMode>; sourceVersion=<exactSourceVersion>; targetVersion=<exactTargetVersion>; claimId=<exactClaimId>"
+    },
+    "coordinator_claim": "[codex-project-flow:upgrade-claim:v2] projectId=<exactProjectId>; requestId=<exactRequestId>; coordinatorThreadId=<exactCoordinatorThreadId>; targetVersion=<exactTargetVersion>; claimId=<exactClaimId>",
+    "transaction_key": "[codex-project-flow:upgrade:v1] projectId=<exactProjectId>; coordinatorThreadId=<exactCoordinatorThreadId>; sourceVersion=<exactSourceVersion>; targetVersion=<exactTargetVersion>; generation=<positiveInteger>",
+    "successor_key": "[codex-project-flow:execution:v3] projectId=<exactProjectId>; hubThreadId=<exactHubThreadId>; requestId=<exactRequestId>; predecessorThreadId=<exactPredecessorThreadId>; generation=<positiveInteger>; workflowVersion=<exactWorkflowVersion>; upgradeTransaction=<exactUpgradeTransaction>",
+    "task_handshake": "[codex-project-flow:handshake:v2] projectId=<exactProjectId>; hubThreadId=<exactHubThreadId>; requestId=<exactRequestId>; workflowVersion=<exactWorkflowVersion>; upgradeTransaction=<exactUpgradeTransaction>; generation=<positiveInteger>",
+    "hub_handshake": "[codex-project-flow:hub-handshake:v1] projectId=<exactProjectId>; hubThreadId=<exactHubThreadId>; workflowVersion=<exactWorkflowVersion>; upgradeTransaction=<exactUpgradeTransaction>",
+    "observe": {
+      "poll_scan_latest_turns": 3,
+      "include_outputs": false,
+      "stable_terminal_snapshots": 3,
+      "poll_delays_seconds": [1, 2]
+    },
+    "recovery": {
+      "hub_followups": 1,
+      "successor_followups": 1,
+      "compensating_successors": 0
+    },
+    "attempt_deadline_seconds": 60
+  }
+}

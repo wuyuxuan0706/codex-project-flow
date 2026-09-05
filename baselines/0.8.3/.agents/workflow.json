@@ -1,0 +1,79 @@
+{
+  "schema_version": 7,
+  "project": { "name": "<PROJECT_NAME>" },
+  "paths": {
+    "project_state": "docs/PROJECT_STATE.md",
+    "workflow_protocol": ".agents/WORKFLOW_PROTOCOL.md"
+  },
+  "tasks": {
+    "max_active": 5,
+    "hub_occupies_slot": false,
+    "blocked_waiting_queued_occupy_slot": true,
+    "visible_execution_required": true,
+    "hidden_subagents_may_substitute": false,
+    "management_failure": "stop"
+  },
+  "execution": {
+    "parallel": ["non_conflicting"],
+    "serial": ["high_risk", "external"]
+  },
+  "bootstrap": {
+    "registry_path": ".project-flow/hub.json",
+    "lock_path": ".project-flow/bootstrap.lock",
+    "registry_schema": 1,
+    "lock_schema": 1,
+    "stale_after_seconds": 300,
+    "fast_path": "registry_targeted_read",
+    "recovery_path": "exhaustive_metadata_on_exception",
+    "title_identity": "saved_project_binding_plus_mutation_thread",
+    "unarchive": "only_when_explicitly_archived",
+    "lock_acquire": "atomic_create_new",
+    "lock_inspect": "validated_read_only",
+    "existing_lock": "inspect_then_recover_or_stop",
+    "lock_release": "owner_claim_only",
+    "stale_recovery": "exact_token_cas_same_thread_or_install_orphan",
+    "claim_title": "[cpf-claim] <shortClaimId>"
+  },
+  "rotation": {
+    "review_turn": 6,
+    "latest_turn": 10,
+    "key": "[codex-project-flow:execution:v1] projectId=<exactProjectId>; hubThreadId=<exactHubThreadId>; predecessorThreadId=<exactPredecessorThreadId>; generation=<positiveInteger>"
+  },
+  "upgrade": {
+    "protocol": 2,
+    "transaction_task_role": "visible_coordinator_executor",
+    "discovery": {
+      "listing": "exhaustive_metadata",
+      "history": "targeted",
+      "fallback": "full_on_ambiguity"
+    },
+    "zero_active_fast_path": true,
+    "reconcile": {
+      "independent_pairs": "parallel_within_available_slots",
+      "pair_order": ["archive_predecessor", "create_successor", "verify_handshake"]
+    },
+    "barrier": {
+      "provisional": "[codex-project-flow:upgrade-barrier:v1] state=provisional; projectId=<exactProjectId>; mode=<exactMode>; sourceVersion=<exactSourceVersion>; targetVersion=<exactTargetVersion>; claimId=<exactClaimId>",
+      "active": "[codex-project-flow:upgrade-barrier:v1] state=active; projectId=<exactProjectId>; coordinatorThreadId=<exactCoordinatorThreadId>; sourceVersion=<exactSourceVersion>; targetVersion=<exactTargetVersion>; generation=<positiveInteger>",
+      "released": "[codex-project-flow:upgrade-barrier:v1] state=released; projectId=<exactProjectId>; coordinatorThreadId=<exactCoordinatorThreadId>; sourceVersion=<exactSourceVersion>; targetVersion=<exactTargetVersion>; generation=<positiveInteger>",
+      "cancelled": "[codex-project-flow:upgrade-barrier:v1] state=cancelled; projectId=<exactProjectId>; mode=<exactMode>; sourceVersion=<exactSourceVersion>; targetVersion=<exactTargetVersion>; claimId=<exactClaimId>"
+    },
+    "coordinator_claim": "[codex-project-flow:upgrade-claim:v1] projectId=<exactProjectId>; targetVersion=<exactTargetVersion>; claimId=<exactClaimId>",
+    "transaction_key": "[codex-project-flow:upgrade:v1] projectId=<exactProjectId>; coordinatorThreadId=<exactCoordinatorThreadId>; sourceVersion=<exactSourceVersion>; targetVersion=<exactTargetVersion>; generation=<positiveInteger>",
+    "successor_key": "[codex-project-flow:execution:v2] projectId=<exactProjectId>; hubThreadId=<exactHubThreadId>; predecessorThreadId=<exactPredecessorThreadId>; generation=<positiveInteger>; workflowVersion=<exactWorkflowVersion>; upgradeTransaction=<exactUpgradeTransaction>",
+    "task_handshake": "[codex-project-flow:handshake:v1] projectId=<exactProjectId>; hubThreadId=<exactHubThreadId>; workflowVersion=<exactWorkflowVersion>; upgradeTransaction=<exactUpgradeTransaction>; generation=<positiveInteger>",
+    "hub_handshake": "[codex-project-flow:hub-handshake:v1] projectId=<exactProjectId>; hubThreadId=<exactHubThreadId>; workflowVersion=<exactWorkflowVersion>; upgradeTransaction=<exactUpgradeTransaction>",
+    "observe": {
+      "poll_scan_latest_turns": 3,
+      "include_outputs": false,
+      "stable_terminal_snapshots": 3,
+      "poll_delays_seconds": [1, 2]
+    },
+    "recovery": {
+      "hub_followups": 1,
+      "successor_followups": 1,
+      "compensating_successors": 1
+    },
+    "attempt_deadline_seconds": 60
+  }
+}

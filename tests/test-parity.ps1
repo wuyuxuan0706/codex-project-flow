@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [string]$BaselineVersion = "0.7.0",
+    [string]$BaselineVersion = "0.8.3",
     [switch]$RequirePosix
 )
 
@@ -112,9 +112,11 @@ exit 21
     return $null
 }
 
-function Invoke-Posix([object]$Runtime, [string]$Mode, [string]$Target, [string]$Transaction = "") {
+function Invoke-Posix([object]$Runtime, [string]$Mode, [string]$Target, [string]$Transaction = "", [switch]$RuntimeValidation) {
     $script = if ($Mode -eq "rollback") {
         'exec sh "$1" rollback --target "$2" --rollback "$3"'
+    } elseif ($RuntimeValidation) {
+        'exec sh "$1" "$2" --target "$3" --runtime'
     } else {
         'exec sh "$1" "$2" --target "$3"'
     }
@@ -129,11 +131,24 @@ function Invoke-Posix([object]$Runtime, [string]$Mode, [string]$Target, [string]
     }
 }
 
-function Invoke-PowerShellEngine([string]$Mode, [string]$Target, [string]$Transaction = "") {
+function Invoke-PowerShellEngine([string]$Mode, [string]$Target, [string]$Transaction = "", [switch]$RuntimeValidation) {
     $hostPath = [Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
     $arguments = @("-NoLogo", "-NoProfile", "-NonInteractive", "-File", $psEngine, $Mode, "-Target", $Target)
     if ($Mode -eq "rollback") { $arguments += @("-Rollback", $Transaction) }
+    if ($RuntimeValidation) { $arguments += "-Runtime" }
     return Invoke-Process $hostPath $arguments
+}
+
+function Invoke-PowerShellRaw([string[]]$Arguments) {
+    $hostPath = [Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+    return Invoke-Process $hostPath (@("-NoLogo", "-NoProfile", "-NonInteractive", "-File", $psEngine) + $Arguments)
+}
+
+function Invoke-PosixRaw([object]$Runtime, [string[]]$Arguments) {
+    return Invoke-Process $Runtime.Bash (@($shEngine) + $Arguments) @{
+        PYTHON = $Runtime.Python
+        PYTHONIOENCODING = "utf-8"
+    }
 }
 
 function Start-Helper([string]$FileName, [string[]]$Arguments, [hashtable]$Environment) {
@@ -373,6 +388,69 @@ try {
     $posixBefore = Get-RollbackTree $posixRoot
     Assert-True ((Get-CanonicalJson $psBefore) -ceq (Get-CanonicalJson $posixBefore)) "Fixtures are not identical before execution"
 
+    $psProbeBefore = Invoke-PowerShellEngine "probe" $psRoot
+    $posixProbeBefore = Invoke-Posix $runtime "probe" $posixRoot
+    Assert-True ($psProbeBefore.ExitCode -eq 0) "PowerShell probe failed: $($psProbeBefore.StdErr)"
+    Assert-True ($posixProbeBefore.ExitCode -eq 0) "POSIX probe failed: $($posixProbeBefore.StdErr)"
+    Assert-True ((Get-CanonicalJson ($psProbeBefore.StdOut | ConvertFrom-Json)) -ceq (Get-CanonicalJson ($posixProbeBefore.StdOut | ConvertFrom-Json))) "Probe contracts differ before apply"
+
+    $psHubRoot = Join-Path $temp "hub-powershell"; $posixHubRoot = Join-Path $temp "hub-posix"
+    [IO.Directory]::CreateDirectory($psHubRoot) | Out-Null; [IO.Directory]::CreateDirectory($posixHubRoot) | Out-Null
+    $projectId = "project-parity-0001"; $ownerId = "claim-parity-0001"; $threadId = "thread-parity-0001"; $otherThreadId = "thread-parity-0002"; $hubTitle = "项目中枢 · Parity"
+    $psAcquire = Invoke-PowerShellRaw @("bootstrap-lock-acquire", "-Target", $psHubRoot, "-ProjectId", $projectId, "-OwnerId", $ownerId, "-Phase", "install")
+    $posixAcquire = Invoke-PosixRaw $runtime @("bootstrap-lock-acquire", "--target", $posixHubRoot, "--project-id", $projectId, "--owner-id", $ownerId, "--phase", "install")
+    Assert-True ($psAcquire.ExitCode -eq 0 -and $posixAcquire.ExitCode -eq 0) "Bootstrap lock acquire parity failed: $($psAcquire.StdErr) $($posixAcquire.StdErr)"
+    $psLock = $psAcquire.StdOut | ConvertFrom-Json; $posixLock = $posixAcquire.StdOut | ConvertFrom-Json
+    $psLockStable = [ordered]@{schemaVersion=$psLock.schemaVersion;projectId=$psLock.projectId;ownerId=$psLock.ownerId;threadId=$psLock.threadId;phase=$psLock.phase}
+    $posixLockStable = [ordered]@{schemaVersion=$posixLock.schemaVersion;projectId=$posixLock.projectId;ownerId=$posixLock.ownerId;threadId=$posixLock.threadId;phase=$posixLock.phase}
+    Assert-True ((Get-CanonicalJson $psLockStable) -ceq (Get-CanonicalJson $posixLockStable)) "Bootstrap lock JSON contracts differ"
+    $psInspect = Invoke-PowerShellRaw @("bootstrap-lock-inspect", "-Target", $psHubRoot, "-ProjectId", $projectId)
+    $posixInspect = Invoke-PosixRaw $runtime @("bootstrap-lock-inspect", "--target", $posixHubRoot, "--project-id", $projectId)
+    Assert-True ($psInspect.ExitCode -eq 0 -and $posixInspect.ExitCode -eq 0) "Bootstrap lock inspect parity failed: $($psInspect.StdErr) $($posixInspect.StdErr)"
+    $psInspection = $psInspect.StdOut | ConvertFrom-Json; $posixInspection = $posixInspect.StdOut | ConvertFrom-Json
+    $psInspectStable = [ordered]@{schemaVersion=$psInspection.schemaVersion;projectId=$psInspection.projectId;ownerId=$psInspection.ownerId;threadId=$psInspection.threadId;phase=$psInspection.phase;isStale=$psInspection.isStale}
+    $posixInspectStable = [ordered]@{schemaVersion=$posixInspection.schemaVersion;projectId=$posixInspection.projectId;ownerId=$posixInspection.ownerId;threadId=$posixInspection.threadId;phase=$posixInspection.phase;isStale=$posixInspection.isStale}
+    Assert-True ((Get-CanonicalJson $psInspectStable) -ceq (Get-CanonicalJson $posixInspectStable)) "Bootstrap lock inspection JSON contracts differ"
+    Assert-True ($psInspection.staleAt -and $posixInspection.staleAt -and -not $psInspection.isStale -and -not $posixInspection.isStale) "Fresh bootstrap lock was reported stale"
+
+    $bootstrapSignals = Join-Path $temp "bootstrap-helper-signals"
+    [IO.Directory]::CreateDirectory($bootstrapSignals) | Out-Null
+    $psBootstrapReady = Join-Path $bootstrapSignals "powershell.ready"; $psBootstrapRelease = Join-Path $bootstrapSignals "powershell.release"; $psBootstrapError = Join-Path $bootstrapSignals "powershell.error"
+    $psBootstrapHolder = Start-PowerShellLockHolder (Join-Path $psHubRoot ".project-flow/bootstrap.lock") $psBootstrapReady $psBootstrapRelease $psBootstrapError
+    try {
+        Wait-HelperReady $psBootstrapHolder $psBootstrapReady $psBootstrapError
+        $blockedPsInspect = Invoke-PowerShellRaw @("bootstrap-lock-inspect", "-Target", $psHubRoot, "-ProjectId", $projectId)
+        Assert-True ($blockedPsInspect.ExitCode -ne 0) "PowerShell inspect ignored an OS-held bootstrap lock"
+    } finally { Stop-Helper $psBootstrapHolder $psBootstrapRelease }
+
+    $posixBootstrapReady = Join-Path $bootstrapSignals "python.ready"; $posixBootstrapRelease = Join-Path $bootstrapSignals "python.release"; $posixBootstrapError = Join-Path $bootstrapSignals "python.error"
+    $posixBootstrapHolder = Start-PythonLockHolder $runtime (Join-Path $posixHubRoot ".project-flow/bootstrap.lock") $posixBootstrapReady $posixBootstrapRelease $posixBootstrapError
+    try {
+        Wait-HelperReady $posixBootstrapHolder $posixBootstrapReady $posixBootstrapError
+        $blockedPosixInspect = Invoke-PosixRaw $runtime @("bootstrap-lock-inspect", "--target", $posixHubRoot, "--project-id", $projectId)
+        Assert-True ($blockedPosixInspect.ExitCode -ne 0) "POSIX inspect ignored an OS-held bootstrap lock"
+    } finally { Stop-Helper $posixBootstrapHolder $posixBootstrapRelease }
+
+    $psSecond = Invoke-PowerShellRaw @("bootstrap-lock-acquire", "-Target", $psHubRoot, "-ProjectId", $projectId, "-OwnerId", "claim-parity-0002", "-Phase", "install")
+    $posixSecond = Invoke-PosixRaw $runtime @("bootstrap-lock-acquire", "--target", $posixHubRoot, "--project-id", $projectId, "--owner-id", "claim-parity-0002", "--phase", "install")
+    Assert-True ($psSecond.ExitCode -ne 0 -and $posixSecond.ExitCode -ne 0) "One platform allowed a second bootstrap owner"
+    $psRenew = Invoke-PowerShellRaw @("bootstrap-lock-renew", "-Target", $psHubRoot, "-ProjectId", $projectId, "-OwnerId", $ownerId, "-ThreadId", $threadId, "-Phase", "claim")
+    $posixRenew = Invoke-PosixRaw $runtime @("bootstrap-lock-renew", "--target", $posixHubRoot, "--project-id", $projectId, "--owner-id", $ownerId, "--thread-id", $threadId, "--phase", "claim")
+    Assert-True ($psRenew.ExitCode -eq 0 -and $posixRenew.ExitCode -eq 0) "Bootstrap lock renew parity failed"
+    $psWrite = Invoke-PowerShellRaw @("hub-write", "-Target", $psHubRoot, "-ProjectId", $projectId, "-OwnerId", $ownerId, "-HubThreadId", $threadId, "-HubTitle", $hubTitle)
+    $posixWrite = Invoke-PosixRaw $runtime @("hub-write", "--target", $posixHubRoot, "--project-id", $projectId, "--owner-id", $ownerId, "--hub-thread-id", $threadId, "--hub-title", $hubTitle)
+    Assert-True ($psWrite.ExitCode -eq 0 -and $posixWrite.ExitCode -eq 0) "Hub registry write parity failed: $($psWrite.StdErr) $($posixWrite.StdErr)"
+    $psHub = $psWrite.StdOut | ConvertFrom-Json; $posixHub = $posixWrite.StdOut | ConvertFrom-Json
+    $psHubStable = [ordered]@{schemaVersion=$psHub.schemaVersion;projectId=$psHub.projectId;threadId=$psHub.threadId;hubTitle=$psHub.hubTitle}
+    $posixHubStable = [ordered]@{schemaVersion=$posixHub.schemaVersion;projectId=$posixHub.projectId;threadId=$posixHub.threadId;hubTitle=$posixHub.hubTitle}
+    Assert-True ((Get-CanonicalJson $psHubStable) -ceq (Get-CanonicalJson $posixHubStable)) ("Hub registry JSON contracts differ: ps=" + (Get-CanonicalJson $psHubStable) + " posix=" + (Get-CanonicalJson $posixHubStable))
+    $psOverwrite = Invoke-PowerShellRaw @("hub-write", "-Target", $psHubRoot, "-ProjectId", $projectId, "-OwnerId", $ownerId, "-HubThreadId", $otherThreadId, "-HubTitle", $hubTitle)
+    $posixOverwrite = Invoke-PosixRaw $runtime @("hub-write", "--target", $posixHubRoot, "--project-id", $projectId, "--owner-id", $ownerId, "--hub-thread-id", $otherThreadId, "--hub-title", $hubTitle)
+    Assert-True ($psOverwrite.ExitCode -ne 0 -and $posixOverwrite.ExitCode -ne 0) "One platform allowed a different hub thread overwrite"
+    $psRelease = Invoke-PowerShellRaw @("bootstrap-lock-release", "-Target", $psHubRoot, "-ProjectId", $projectId, "-OwnerId", $ownerId)
+    $posixRelease = Invoke-PosixRaw $runtime @("bootstrap-lock-release", "--target", $posixHubRoot, "--project-id", $projectId, "--owner-id", $ownerId)
+    Assert-True ($psRelease.ExitCode -eq 0 -and $posixRelease.ExitCode -eq 0) "Bootstrap lock release parity failed"
+
     $signalRoot = Join-Path $temp "helper-signals"
     [IO.Directory]::CreateDirectory($signalRoot) | Out-Null
     $psHeldRoot = Join-Path $temp "powershell-lock-posix-apply"
@@ -441,6 +519,21 @@ try {
     $posixValidate = Invoke-Posix $runtime "validate" $posixRoot
     Assert-True ($psValidate.ExitCode -eq 0) "PowerShell validation failed after apply: $($psValidate.StdErr)"
     Assert-True ($posixValidate.ExitCode -eq 0) "POSIX validation failed after apply: $($posixValidate.StdErr)"
+    $psRuntimeValidate = Invoke-PowerShellEngine "validate" $psRoot "" -RuntimeValidation
+    $posixRuntimeValidate = Invoke-Posix $runtime "validate" $posixRoot "" -RuntimeValidation
+    Assert-True ($psRuntimeValidate.ExitCode -eq 0) "PowerShell runtime validation failed after apply: $($psRuntimeValidate.StdErr)"
+    Assert-True ($posixRuntimeValidate.ExitCode -eq 0) "POSIX runtime validation failed after apply: $($posixRuntimeValidate.StdErr)"
+    $psProbeAfter = Invoke-PowerShellEngine "probe" $psRoot
+    $posixProbeAfter = Invoke-Posix $runtime "probe" $posixRoot
+    Assert-True ($psProbeAfter.ExitCode -eq 0) "PowerShell probe failed after apply: $($psProbeAfter.StdErr)"
+    Assert-True ($posixProbeAfter.ExitCode -eq 0) "POSIX probe failed after apply: $($posixProbeAfter.StdErr)"
+    $psProbeContract = $psProbeAfter.StdOut | ConvertFrom-Json
+    $posixProbeContract = $posixProbeAfter.StdOut | ConvertFrom-Json
+    $psProbeStable = [ordered]@{ managed=$psProbeContract.managed; workflow_version=$psProbeContract.workflow_version; project_name=$psProbeContract.project_name; managed_files=$psProbeContract.managed_files }
+    $posixProbeStable = [ordered]@{ managed=$posixProbeContract.managed; workflow_version=$posixProbeContract.workflow_version; project_name=$posixProbeContract.project_name; managed_files=$posixProbeContract.managed_files }
+    Assert-True ((Get-CanonicalJson $psProbeStable) -ceq (Get-CanonicalJson $posixProbeStable)) "Stable probe contracts differ after apply"
+    Assert-True (-not [string]::IsNullOrWhiteSpace([string]$psProbeContract.last_transaction)) "PowerShell probe omitted last_transaction after apply"
+    Assert-True (-not [string]::IsNullOrWhiteSpace([string]$posixProbeContract.last_transaction)) "POSIX probe omitted last_transaction after apply"
     $psApplied = Get-ManagedContract $psRoot $managed
     $posixApplied = Get-ManagedContract $posixRoot $managed
     Assert-True ((Get-CanonicalJson ([ordered]@{ content = $psApplied.content; manifest = $psApplied.manifest })) -ceq (Get-CanonicalJson ([ordered]@{ content = $posixApplied.content; manifest = $posixApplied.manifest }))) "Applied managed content or manifest contract differs"

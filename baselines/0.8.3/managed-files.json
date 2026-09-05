@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "kind": "managed_files_baseline",
+  "workflow_version": "0.8.3",
+  "files": [
+    {
+      "path": "AGENTS.md",
+      "source": "AGENTS.md",
+      "policy": "merge_manual",
+      "render": "project_name",
+      "content_hash": "sha256:9acf2a4659847dd8a9e013550e2b42daf5b1aae5c41ce2f6e046269ed20b9b1d"
+    },
+    {
+      "path": ".agents/workflow.json",
+      "source": ".agents/workflow.json",
+      "policy": "structured_manual",
+      "render": "project_name_json",
+      "content_hash": "sha256:c1eb68b2ab49e7744f7c961b23d898f2c09b6d0d09099ca05fd2362ef9fbc8d1"
+    },
+    {
+      "path": ".agents/WORKFLOW_PROTOCOL.md",
+      "source": ".agents/WORKFLOW_PROTOCOL.md",
+      "policy": "replace_if_unmodified",
+      "render": "project_name",
+      "content_hash": "sha256:8f09d9cd94273993afad7d1980a0a851fa66d7d4e2a5f28e4b9a17ff15397080"
+    },
+    {
+      "path": ".agents/skills/project-workflow-manager/SKILL.md",
+      "source": ".agents/skills/project-workflow-manager/SKILL.md",
+      "policy": "replace_if_unmodified",
+      "render": "project_name",
+      "content_hash": "sha256:4648a52106996498b78ec1ae824414d89d15ac72a045a1b42d95d54648af5dbb"
+    },
+    {
+      "path": ".agents/skills/project-workflow-manager/agents/openai.yaml",
+      "source": ".agents/skills/project-workflow-manager/agents/openai.yaml",
+      "policy": "replace_if_unmodified",
+      "render": "project_name",
+      "content_hash": "sha256:7a655cb2cd8cdf8212d2bb5606d561cef9cf5bb3ce220b348d3b89c832fee948"
+    },
+    {
+      "path": "docs/PROJECT_STATE.md",
+      "source": "templates/PROJECT_STATE.md",
+      "policy": "seed_once",
+      "render": "project_name",
+      "content_hash": "sha256:dba52ab7de111f2e2ab688595b5d1df050fce6de28b21d3322b6855f7d2b8dd4"
+    }
+  ]
+}

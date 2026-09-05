@@ -1,5 +1,5 @@
 [CmdletBinding()]
-param([string]$Target = ".", [switch]$AllowPlaceholders)
+param([string]$Target = ".", [switch]$AllowPlaceholders, [switch]$Runtime)
 
 & (Join-Path $PSScriptRoot "project-flow.ps1") validate @PSBoundParameters
 $succeeded = $?

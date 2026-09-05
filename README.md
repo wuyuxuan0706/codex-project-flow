@@ -1,40 +1,66 @@
 # Codex Project Flow
 
-一套简洁、可移植、可升级的 Codex 项目协作模板。它把只读 Work、编号授权、永久项目中枢、执行任务分代轮换、任务感知升级、证据分级和长期状态维护整理为可复制的规则、配置、提示词与文档骨架。
+一套可移植、可升级的 Codex 项目协作模板。永久项目中枢只负责启动请求；每个请求唯一的用户可见执行任务负责后续确认、实现、文档评审、完成验收和自归档。
 
-模板不绑定语言、框架、目录结构、设备或运行环境，可用于新项目，也可非破坏地安装到已有仓库。
+模板不绑定语言、框架、目录结构或设备，既可用于新项目，也可非破坏地安装到已有仓库。
 
-## 模板内容
+## 包含内容
 
-- `AGENTS.md`：通用协作边界、按需读取和证据规则。
-- `.codex-plugin/plugin.json`：Codex 插件清单。
-- `.agents/workflow.json`：schema 6 机器契约，只保存路径、安全开关、执行并发策略、精确数值和身份模板。
-- `.agents/WORKFLOW_PROTOCOL.md`：统一的中枢、执行轮换、升级协调与结果回传协议。
-- `skills/`：两个插件 Skill 共 6 个文件；Bootstrap 为元数据优先的单一状态机，Upgrade 按协调与文件事务两类信息加载契约。
-- `.agents/skills/project-workflow-manager/`：只维护长期项目状态的 Skill。
+- `AGENTS.md`：通用协作边界和证据规则。
+- `.agents/workflow.json`：schema 10 机器契约。
+- `.agents/WORKFLOW_PROTOCOL.md`：中枢、执行任务、升级和结果回传协议。
+- `docs/INTERACTION_FLOW.md`：可共同修改的交互流程图。
 - `docs/PROJECT_STATE.md`：唯一动态项目状态。
-- `templates/PROJECT_STATE.md`：安装到新项目时使用的空白初始状态，避免携带模板仓库自身进度。
-- `managed-files.json`：受管文件及升级策略。
-- `baselines/`：每个旧版本的不可变内容与托管元数据；升级差异由路径集合自动推导。
-- `scripts/project-flow.ps1` 与 `scripts/project-flow.sh`：PowerShell/POSIX 两个平台共享核心事务引擎；旧命令入口保留为静默兼容转发器。
+- `skills/`：Bootstrap 与 Upgrade 插件 Skill。
+- `.agents/skills/project-workflow-manager/`：长期项目状态维护 Skill。
+- `templates/PROJECT_STATE.md`：新项目的空白状态模板。
+- `managed-files.json`：受管文件和升级策略。
+- `baselines/`：受支持版本基线，最低版本为 `0.8.3`。
+- `scripts/project-flow.ps1`、`scripts/project-flow.sh`：PowerShell/POSIX 事务引擎；旧入口仅作兼容转发。
 
-## 一键导入并创建项目中枢
+## 安装 Plugin
 
-安装本插件后，在目标项目的 Codex 新任务中调用 `$bootstrap-project-flow`。这是完整的初始化入口：它一步安装项目协作文件，并默认让发出部署命令的当前任务认领永久项目中枢，标题形如 `项目中枢 · 项目名`。认领完成后，当前任务加载 `.agents/WORKFLOW_PROTOCOL.md` 并直接进入运行态，不再留下单独的一次性部署任务。
+克隆仓库只会取得源码，不会把 Plugin 注册到 Codex。每台设备首次使用时，应把稳定仓库检出登记到个人 Marketplace，并安装：
 
-重复调用时，Skill 穷尽普通、固定和已归档任务的元数据，优先按精确项目标识与标题身份恢复已有中枢，只对匹配候选读取历史；无标题、矛盾或元数据不完整时才扩大历史读取。已有中枢时不把当前任务改成第二个中枢。若历史原因产生多个候选或强信号矛盾，Skill 停止并让用户指定保留项；明确获准清理后，被淘汰任务会获得版本化退役标题、取消固定并归档。只有用户明确要求独立中枢模式时才新建任务；若创建仍处于排队状态，应等待该任务出现在任务列表，不要再次启动 bootstrap。
+```text
+codex-project-flow@personal
+```
 
-插件安装或文件复制本身没有“安装完成后自动执行”的零点击钩子。应显式调用一次 `$bootstrap-project-flow`，不要把打开仓库、复制目录或安装插件本体误认为已经创建了项目中枢任务。
+推荐让 `$plugin-creator` 完成登记、cachebuster 和安装。个人 Marketplace 的源码入口应为 `~/plugins/codex-project-flow`，可以链接到长期维护的仓库检出，避免维护两份源码。
 
-### 首次安装 Plugin
+安装或更新 Plugin 后新建任务，使 Codex 加载最新的 `$bootstrap-project-flow` 和 `$upgrade-project-flow`。Plugin 是设备级能力，每个项目只需单独执行 bootstrap。
 
-克隆仓库只获得源码，不会自动把 Plugin 注册到 Codex。每台设备首次使用时，需要把稳定的仓库检出登记到默认个人 Marketplace，并安装一次 `codex-project-flow@personal`。推荐在 Codex 中让 `$plugin-creator` 完成登记和安装；个人 Marketplace 的插件源码入口应为 `~/plugins/codex-project-flow`，可将它链接到长期维护的仓库检出，避免维护两份源码。
+## 初始化项目
 
-安装成功后新建一个任务，使 Codex 重新加载 `$bootstrap-project-flow` 和 `$upgrade-project-flow`。Plugin 是设备级能力，不需要为每个项目重复安装；每个新项目仍需调用一次 bootstrap，已部署项目则在 Plugin 更新后按需调用 upgrade。开发中的 Plugin 源码发生变化时，应使用 `$plugin-creator` 的 cachebuster 与重新安装流程刷新 Codex 缓存，而不是手工修改 Marketplace 清单。
+在目标项目的新任务中调用：
 
-## 仅安装项目文件
+```text
+$bootstrap-project-flow
+```
 
-如只需把模板文件安装到项目，可手动运行安装器。
+默认情况下，当前任务会安装项目文件并认领为永久项目中枢，标题为：
+
+```text
+项目中枢 · <项目名>
+```
+
+不会额外创建一次性部署任务。只有用户明确要求独立中枢时，才允许创建另一个任务；已有中枢只有在用户明确授权当前任务替换登记中的精确旧中枢时才能替换。
+
+Bootstrap 在写入任何新建或修改的 Markdown 前，必须先在聊天中提交所有完整草稿和精确路径，获得用户对当前内容的明确批准后才能安装。
+
+初始化状态保存在：
+
+- `.project-flow/hub.json`：项目与真实中枢任务的登记。
+- `.project-flow/bootstrap.lock`：认领、恢复和替换操作的 owner 锁。
+- `.project-flow/manifest.json`：已安装受管文件的唯一项目入口。
+
+正常重复调用只按登记的精确任务 ID 定向读取，不枚举所有任务。只有登记损坏、任务不可访问、陈旧锁或身份歧义等异常情况才进行完整发现。任何身份冲突、多个候选、锁竞争或不完整结果都失败关闭，不猜测任务 ID，也不创建替代中枢。
+
+复制项目会形成新的项目路径和身份，不能复用来源项目的登记、锁或中枢任务。
+
+## 手动安装项目文件
+
+如果只需要复制模板文件，而不需要创建或认领 Codex 项目中枢，可直接运行引擎。
 
 PowerShell：
 
@@ -42,63 +68,89 @@ PowerShell：
 .\scripts\project-flow.ps1 install -Target ..\your-project -ProjectName "Your Project"
 ```
 
-POSIX shell：
+POSIX：
 
 ```sh
 ./scripts/project-flow.sh install --target ../your-project --project-name "Your Project"
 ```
 
-POSIX 安装与升级脚本默认调用 `python3`，也可通过 `PYTHON` 显式指定兼容的 Python 3 解释器；PowerShell 入口不依赖 Python。
+POSIX 默认使用 `python3`，也可通过 `PYTHON` 指定兼容的 Python 3；PowerShell 入口不依赖 Python。
 
-安装器默认跳过目标项目中的已有文件，不覆盖现有内容，并为完整的新安装写入 `.project-flow/manifest.json`；写入或最终校验中途失败时恢复本次已经替换或创建的受管文件。若检测到没有清单但已经存在受管文件，安装器保留原有跳过行为，但不会把未知来源的内容静默纳管；应改用升级器并显式确认 `0.2.0` 基线。目标项目已有根 `AGENTS.md` 时，人工把本模板的通用规则合并到原文件，并保留项目事实。
+安装默认跳过目标项目已有文件，不覆盖未知内容。完整安装会写入 `.project-flow/manifest.json`；失败时恢复本次已创建或替换的受管文件。
 
-确实需要重置文件时，使用 PowerShell 的 `-Force` 或 shell 的 `--force`。被替换的文件会先备份到目标项目的 `.project-flow-backup/<timestamp>/`。`Force` 是显式重置，不是升级入口。
+已有受管文件但没有有效 manifest 的项目不会被静默纳管，也不能直接升级。应恢复 `0.8.3` 或更新版本的有效 manifest，或者执行干净安装。
 
-这些脚本以及直接复制模板只能安装文件，不能调用 Codex 桌面的任务 API，因此不会创建或复用用户可见的项目中枢任务。需要完整的一键流程时，在 Codex 中调用 `$bootstrap-project-flow`。
+需要显式重置时使用 PowerShell 的 `-Force` 或 POSIX 的 `--force`。被替换文件先备份到 `.project-flow-backup/<timestamp>/`。Force 是重置操作，不能代替升级。
 
-## 定制点
+手动脚本无法调用 Codex 任务接口，因此不会创建、复用或替换项目中枢。
 
-安装后至少完成以下定制：
+## 交互模式
 
-1. 在 `AGENTS.md` 填写少量稳定的项目事实，并补充项目特有的安全边界。
-2. 如项目使用不同路径，调整 `.agents/workflow.json` 中的规则和状态路径。
-3. 在更深目录的 `AGENTS.md` 补充模块特有的构建、测试和外部操作约束。
-4. 初始化 `docs/PROJECT_STATE.md` 的四个章节。
-5. 如已有更具体的根规则，保留项目事实和更严格的项目边界。
+共享流程图位于 `docs/INTERACTION_FLOW.md`，机器约束位于 `.agents/workflow.json`，完整运行规则位于 `.agents/WORKFLOW_PROTOCOL.md`。
 
-## 升级已部署项目
+每个新请求按以下方式处理：
 
-更新插件只提供新版 Skill 和模板；已部署项目仍需在目标项目的永久中枢调用 `$upgrade-project-flow`。默认 plan 只授权中枢创建一个普通可见计划任务，不启用升级屏障。新 apply/rollback 时，中枢先在自身原始消息记录临时屏障状态并阻止普通创建，再创建一个独立用户可见升级事务任务；resume 只恢复已有屏障和原事务任务。中枢本身不运行引擎，也不兼任该任务。
+1. 用户在永久项目中枢下达任务。
+2. 中枢生成唯一 `requestId`，输出初始理解和执行项。
+3. 用户确认后，中枢只创建一个用户可见执行任务。
+4. 一旦取得真实任务 ID 或 queued `clientThreadId`，中枢退出该请求。
+5. 执行任务直接与用户完成范围确认、修改循环、实现、验证、文档评审和完成验收。
+6. 用户否决结果时，原执行任务输出新理解和执行项，确认后继续原任务。
+7. 用户最终同意后，执行任务精确归档自身；归档明确成功后请求结束。
 
-1. apply/rollback 前从 `pluginRoot` 读取目标版本契约，不要求旧项目预先存在新版协议；文件事务成功后才切换到目标项目中新部署或恢复的规则。
-2. 事务任务按机器模板认领身份、生成事务键，取得中枢的 active 屏障原始消息，把临时屏障重绑定到正式事务，穷尽当前项目任务元数据，只读取相关历史并固定活动任务快照；它直接完成文件修改、内部验证或回滚。
-3. 插件所有内容采用新版；`AGENTS.md` 仅保留“项目事实”，项目状态保持 `seed_once`，退役文件先备份并可回滚。
-4. 文件成功后取得中枢原始握手。空快照经一次最终元数据扫描直接进入释放；非空快照按可用名额并行处理独立的前任→继任任务对，每对内部保持归档、创建、握手顺序。中枢记录 released 原始屏障消息后才真正解除屏障。
-5. 每个历史版本只有一份不可变内容/元数据基线；路径差异直接推导新增与退役，不维护成对迁移链。
+同一请求的多模块、多文件、多轮修改和多种内部动作都留在同一执行任务。中枢不接收完成项、不转发修改意见，也不归档执行任务。
 
-resume 从中枢原始屏障消息恢复状态，复用既有事务任务、文件事务和握手，只继续未决阶段。rollback 必须指定目标项目所属的精确事务 ID，并由独立可见升级事务任务完成；成功后切换到已恢复版本的契约。任何身份、任务管理、契约加载或协调恢复失败都会保留屏障并停止，不回退到中枢执行。
+替代或轮换执行任务必须由用户在当前执行任务中明确授权，不能因失败恢复、上下文长度或升级自动触发。隐藏代理不能替代用户可见执行任务。
 
-Shell 和 PowerShell 的具体参数由 Skill 按当前平台选择。不要用安装器的 `--force` 或 `-Force` 代替升级。
+## 文档评审
 
-## 项目中枢
+所有新建或修改的 Markdown 必须由当前执行任务先在聊天中提交：
 
-认领或复用完成后，项目中枢任务本身就是日常入口；`.agents/WORKFLOW_PROTOCOL.md` 是中枢、执行轮换和升级协调的统一运行协议，不是初始化器。中枢不得调用 bootstrap、派生另一个中枢或因开始后续工作而重复创建中枢。
+- 精确目标路径；
+- 完整纯文本草稿；
+- 与批准内容绑定的内容哈希。
 
-中枢先进入只读 Work，再把修改、检查、构建、测试、文档同步、提交、推送、外部操作和轮换分别编号。用户选择编号只授权创建对应用户可见任务，不授权中枢执行；名额、占用和并行/串行策略读取机器契约。任务管理或身份失败时停止，禁止中枢或隐藏代理替代执行。
+只有用户明确批准当前精确草稿后才能写入。否决、实质内容变化、路径变化或哈希变化都会使批准失效，原任务必须重新提交完整草稿。
 
-## 执行任务分代轮换
+批准只授权对应路径和内容，不授权覆盖未知文件、扩大任务范围或执行其他外部动作。写入后再次修改同一文档，需要开始新的评审轮次。
 
-单个执行任务只承载一个里程碑或一轮聚焦工作，并在机器契约规定的轮次评估和安全轮换。
+## 升级项目
 
-自动轮换需要独立授权。前任任务先按 `.agents/WORKFLOW_PROTOCOL.md` 的执行轮换章节生成交接包并由中枢确认；中枢为继任生成版本化 `rotationKey` 并放在首条用户消息第一行，再归档前任、创建继任。创建无 ID 失败时恢复前任；只返回排队 ID 时保留该键、等待且不重试，物化后按同项目首条用户消息中的完整键精确恢复唯一继任。继任任务必须重新读取规则、核对实际工作区，并把前任验证视为历史证据。范围、接口、环境或验收标准变化时不直接轮换，而是返回 Work 重新确认。
+Plugin 更新不会自动修改已部署项目。应在目标项目的永久中枢调用：
 
-轮换交接属于短期运行状态，不写入 `docs/PROJECT_STATE.md`。使用独立 Git worktree 时，只有改动已形成经授权的可传递检查点，才可以切换到新的执行任务。
+```text
+$upgrade-project-flow
+```
 
-只有需要协调、要求用户选择或用户明确要求时，才使用 `.agents/WORKFLOW_PROTOCOL.md` 的结果回传格式。
+中枢只完成初始理解、执行项、首次授权和唯一升级任务创建。任务身份建立后，plan、apply、resume、rollback、屏障、文档评审、验证、完成验收和自归档全部由该升级任务完成。
 
-## 验证命令
+关键约束：
 
-校验模板仓库：
+1. 同一升级请求始终复用同一用户可见任务。
+2. apply 或 rollback 文件事务前，活动任务快照必须为空。
+3. 如果除中枢和当前升级任务外还存在 active、blocked、waiting 或 queued 任务，立即失败关闭：不写文件、不归档任务、不创建第二个任务。
+4. 现有任务各自在原任务中结束；空闲后由原升级任务重新扫描并继续。
+5. 插件内容采用目标版本；`AGENTS.md` 保留项目事实，项目状态使用 `seed_once`。
+6. 退役和替换文件先进入事务备份，失败可回滚。
+7. 屏障释放后仍需输出完成项并等待用户验收；最终同意后升级任务自归档。
+8. rollback 必须使用目标项目所属的精确事务 ID。
+9. 不得用安装器的 `-Force` 或 `--force` 代替升级。
+
+任何身份、契约、任务协调、备份认证或竞态检查失败都会保留可恢复证据并停止。
+
+## 项目定制
+
+安装后通常只需：
+
+1. 在根 `AGENTS.md` 填写稳定的项目事实和项目特有边界。
+2. 必要时调整 `.agents/workflow.json` 中的规则或状态路径。
+3. 在更深目录的 `AGENTS.md` 增加模块专用约束。
+4. 初始化 `docs/PROJECT_STATE.md`。
+5. 保留已有项目中更具体或更严格的规则。
+
+## 验证
+
+完整审计模板仓库：
 
 ```powershell
 .\scripts\project-flow.ps1 validate -Target . -AllowPlaceholders
@@ -108,19 +160,17 @@ Shell 和 PowerShell 的具体参数由 Skill 按当前平台选择。不要用�
 ./scripts/project-flow.sh validate --target . --allow-placeholders
 ```
 
-安装到目标项目后：
+校验目标项目已声明的运行时路径：
 
 ```powershell
-.\scripts\project-flow.ps1 validate -Target .
+.\scripts\project-flow.ps1 validate -Target . -Runtime
 ```
 
 ```sh
-./scripts/project-flow.sh validate --target .
+./scripts/project-flow.sh validate --target . --runtime
 ```
 
-校验只确认模板结构和配置一致性，不替代项目自身的检查、构建或测试。发布前还应单独扫描项目专有名称、绝对路径、账号和凭据。
-
-回归测试：
+完整回归：
 
 ```powershell
 .\tests\test.ps1
@@ -130,23 +180,14 @@ Shell 和 PowerShell 的具体参数由 Skill 按当前平台选择。不要用�
 ./tests/test.sh
 ```
 
-跨平台差分测试在同一历史 fixture 上分别运行 PowerShell 与 POSIX 的 plan、apply 和 rollback，并比较规范化动作、托管内容、manifest、事务稳定字段和回滚结果；它还验证两个引擎能互相识别对方持有的事务锁：
+跨平台差分测试：
 
 ```powershell
 .\tests\test-parity.ps1 -RequirePosix
 ```
 
-默认基线为 `0.7.0`，可用 `-BaselineVersion` 选择其他已认证基线。未安装带可用 Python 3 的 Git Bash 时，不带 `-RequirePosix` 会明确报告 `SKIP`；发布和 CI 应使用该开关，把缺失运行环境视为失败，不能把跳过记录成通过。
+缺少带 Python 3 的 POSIX 环境时，未使用 `-RequirePosix` 会明确报告 `SKIP`；发布和 CI 应使用该开关。
 
-所有实际写入路径共用 `.project-flow/transaction.lock` 的跨平台 OS 单写者锁；plan、validate 和 dry-run 保持只读且不创建锁。rollback 会在首次恢复前认证事务元数据和全部备份，并在逐文件恢复前复核 live/manifest 状态，任一损坏或竞态都失败关闭，不留下部分恢复。
+校验只证明模板结构和契约一致，不替代项目自身的构建、测试或外部验收。发布前还应检查项目专有名称、绝对路径、账号和凭据。
 
-## 设计原则
-
-- 用户决定任务方向和执行授权。
-- Work 只读；各类执行动作分别授权。
-- 部署任务默认原地成为永久中枢；已有中枢优先复用。
-- 中枢持续作为只读协调入口，按机器契约维护用户可见活动任务并在安全点分代轮换。
-- 工作流升级只处理当前项目；plan 使用普通可见计划任务，apply/resume/rollback 使用一个独立可见升级事务任务、创建屏障、目标版本协议、原始消息握手和有界恢复。
-- 范围、接口、环境或验收变化时回到 Work。
-- “文档确认”“静态检查”“实际构建或测试”“外部回传”分别记录。
-- 安装默认非破坏；升级按声明的所有权保护项目内容，并在事务备份后让插件内容采用新版。
+所有文件写入共用 `.project-flow/transaction.lock` 的跨平台单写者锁。plan、validate 和 dry-run 保持只读；rollback 在恢复前认证事务元数据、备份和当前文件状态，发生损坏或竞态时失败关闭。

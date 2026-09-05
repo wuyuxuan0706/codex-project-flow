@@ -3,7 +3,7 @@ set -eu
 
 command_name=${1-}
 [ -n "$command_name" ] || {
-    echo "Usage: project-flow.sh {install|upgrade|plan|apply|rollback|validate} [options]" >&2
+    echo "Usage: project-flow.sh {probe|install|upgrade|plan|apply|rollback|validate|hub-read|hub-write|hub-replacement-prepare|hub-replacement-commit|bootstrap-lock-inspect|bootstrap-lock-acquire|bootstrap-lock-renew|bootstrap-lock-release|bootstrap-lock-recover} [options]" >&2
     exit 2
 }
 shift
@@ -37,6 +37,7 @@ ARGV = sys.argv[3:]
 CONTROL = ".project-flow"
 MANIFEST_REL = ".project-flow/manifest.json"
 BACKUP_ROOT_NAME = ".project-flow-backup"
+BOOTSTRAP_STALE_SECONDS = 300
 VALID_POLICIES = {"seed_once", "merge_manual", "structured_manual", "replace_if_unmodified"}
 VALID_RENDERS = {"none", "project_name", "project_name_json"}
 VALID_OWNERSHIP = {"plugin", "mixed", "project"}
@@ -69,6 +70,12 @@ def reject_control(value, label):
     return value
 
 
+def is_reparse(item):
+    return stat.S_ISLNK(item.st_mode) or bool(
+        getattr(item, "st_file_attributes", 0) & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+    )
+
+
 def normalized_bytes(data, label):
     if data.startswith(b"\xef\xbb\xbf"):
         data = data[3:]
@@ -85,7 +92,7 @@ def read_text(path, label=None):
         item = path.lstat()
     except FileNotFoundError:
         fail(label + " is missing")
-    if stat.S_ISLNK(item.st_mode) or not stat.S_ISREG(item.st_mode):
+    if is_reparse(item) or not stat.S_ISREG(item.st_mode):
         fail(label + " is not a safe regular file")
     return normalized_bytes(path.read_bytes(), label)
 
@@ -142,7 +149,7 @@ def plugin_input(relative, label, allow_missing=False):
                 missing = True
                 continue
             fail(label + " is missing: " + str(rel))
-        if stat.S_ISLNK(item.st_mode):
+        if is_reparse(item):
             fail(label + " path uses a symbolic link: " + str(rel))
     result = PLUGIN_ROOT.joinpath(*rel.parts)
     if not missing:
@@ -170,13 +177,56 @@ def validate_project_name(value):
     return value
 
 
+def identity_value(value, label):
+    reject_control(value, label)
+    if not value.strip():
+        fail(label + " must be non-empty")
+    return value
+
+
+def identifier(value, label):
+    identity_value(value, label)
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", value):
+        fail(label + " contains an illegal identifier")
+    return value
+
+
+def utc_text(value=None):
+    value = value or datetime.datetime.now(datetime.timezone.utc)
+    return value.astimezone(datetime.timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
+
+
+def parse_utc(value, label):
+    reject_control(value, label)
+    try:
+        parsed = datetime.datetime.fromisoformat(value[:-1] + "+00:00" if value.endswith("Z") else value)
+    except ValueError:
+        fail(label + " must be a UTC timestamp")
+    if parsed.tzinfo is None or parsed.utcoffset() != datetime.timedelta(0):
+        fail(label + " must be a UTC timestamp")
+    return parsed.astimezone(datetime.timezone.utc)
+
+
+def same_project_path(actual, expected):
+    identity_value(actual, "Project path")
+    if os.name == "nt":
+        return os.path.normcase(os.path.normpath(actual)) == os.path.normcase(os.path.normpath(expected))
+    return actual == expected
+
+
+def exact_object(value, expected, label):
+    if not isinstance(value, dict) or set(value) != set(expected):
+        fail(label + " has unexpected fields")
+    return value
+
+
 class Target:
     def __init__(self, argument):
         reject_control(argument, "Target path")
         lexical = Path(os.path.abspath(argument))
         if not lexical.is_dir():
             fail("Target directory does not exist: " + str(lexical), 2)
-        if lexical.is_symlink():
+        if is_reparse(lexical.lstat()):
             fail("Target directory must not be a symbolic link: " + str(lexical))
         self.root = Path(os.path.realpath(lexical))
 
@@ -189,7 +239,7 @@ class Target:
                 item = current.lstat()
             except FileNotFoundError:
                 break
-            if stat.S_ISLNK(item.st_mode):
+            if is_reparse(item):
                 fail("Refusing target path through a symbolic link: " + str(current))
         return self.root.joinpath(*rel.parts)
 
@@ -198,7 +248,7 @@ class Target:
             item = path.lstat()
         except FileNotFoundError:
             return False
-        if stat.S_ISLNK(item.st_mode) or not stat.S_ISREG(item.st_mode):
+        if is_reparse(item) or not stat.S_ISREG(item.st_mode):
             fail(label + " exists and is not a safe regular file: " + str(path))
         return True
 
@@ -215,12 +265,12 @@ class Target:
             except FileNotFoundError:
                 os.mkdir(current)
                 continue
-            if stat.S_ISLNK(item.st_mode) or not stat.S_ISDIR(item.st_mode):
+            if is_reparse(item) or not stat.S_ISDIR(item.st_mode):
                 fail("Directory path is not a real directory: " + str(current))
 
     def atomic_bytes(self, path, data):
         self.ensure_directory(path.parent)
-        if path.exists() and (path.is_symlink() or not path.is_file()):
+        if path.exists() and (is_reparse(path.lstat()) or not path.is_file()):
             fail("Refusing to replace a non-file: " + str(path))
         temporary = path.with_name(path.name + ".project-flow-tmp-" + str(os.getpid()) + "-" + uuid.uuid4().hex[:8])
         try:
@@ -246,7 +296,7 @@ def acquire_writer_lock(target):
         item = lock_path.lstat()
     except FileNotFoundError:
         item = None
-    if item is not None and (stat.S_ISLNK(item.st_mode) or not stat.S_ISREG(item.st_mode)):
+    if item is not None and (is_reparse(item) or not stat.S_ISREG(item.st_mode)):
         fail("Writer lock path is not a safe regular file", 5)
     flags = os.O_RDWR | os.O_CREAT
     if hasattr(os, "O_BINARY"):
@@ -277,15 +327,350 @@ def acquire_writer_lock(target):
     return lock_path
 
 
+def bootstrap_lock_path(target):
+    return target.path(CONTROL + "/bootstrap.lock", allow_control=True)
+
+
+def close_bootstrap_lock(handle):
+    try:
+        handle.seek(0)
+        if os.name == "nt":
+            import msvcrt
+            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    finally:
+        handle.close()
+
+
+def write_bootstrap_lock(handle, record):
+    data = (json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
+    handle.seek(0)
+    handle.truncate(0)
+    handle.write(data)
+    handle.flush()
+    os.fsync(handle.fileno())
+
+
+def hub_path(target):
+    return target.path(CONTROL + "/hub.json", allow_control=True)
+
+
+def new_bootstrap_lock_record(target, project_id, owner_id, thread_id, phase, lease_seconds, replacement=None):
+    now = datetime.datetime.now(datetime.timezone.utc)
+    stamp = utc_text(now)
+    bound_thread = identifier(thread_id, "ThreadId") if thread_id else None
+    return {"schemaVersion": 2, "projectId": identifier(project_id, "ProjectId"), "projectPath": str(target.root), "ownerId": identifier(owner_id, "OwnerId"), "threadId": bound_thread, "phase": identity_value(phase, "Phase"), "createdAt": stamp, "renewedAt": stamp, "expiresAt": utc_text(now + datetime.timedelta(seconds=lease_seconds)), "replacement": replacement}
+
+
+def validate_bootstrap_lock(record, target, project_id):
+    common = ("schemaVersion", "projectId", "projectPath", "ownerId", "threadId", "phase", "createdAt", "renewedAt", "expiresAt")
+    if record.get("schemaVersion") == 1:
+        exact_object(record, common, "Bootstrap lock")
+        record["replacement"] = None
+    elif record.get("schemaVersion") == 2:
+        exact_object(record, common + ("replacement",), "Bootstrap lock")
+    else:
+        fail("Bootstrap lock schema is invalid")
+    identifier(record["projectId"], "Bootstrap lock projectId")
+    identity_value(record["projectPath"], "Bootstrap lock projectPath")
+    identifier(record["ownerId"], "Bootstrap lock ownerId")
+    identity_value(record["phase"], "Bootstrap lock phase")
+    if record["threadId"] is not None:
+        identifier(record["threadId"], "Bootstrap lock threadId")
+    replacement = record["replacement"]
+    if replacement is not None:
+        exact_object(replacement, ("expectedHubThreadId", "expectedRegistryToken", "newHubThreadId", "newHubTitle"), "Bootstrap lock replacement")
+        identifier(replacement["expectedHubThreadId"], "ExpectedHubThreadId")
+        if not re.fullmatch(r"sha256:[0-9a-f]{64}", replacement["expectedRegistryToken"]): fail("ExpectedRegistryToken must be a lowercase raw SHA-256 token")
+        identifier(replacement["newHubThreadId"], "NewHubThreadId")
+        identity_value(replacement["newHubTitle"], "NewHubTitle")
+        if record["threadId"] != replacement["newHubThreadId"]: fail("Bootstrap replacement evidence does not match the bound current task")
+    if record["projectId"] != identifier(project_id, "ProjectId"):
+        fail("Bootstrap lock projectId does not match the expected project")
+    if not same_project_path(record["projectPath"], str(target.root)):
+        fail("Bootstrap lock project path does not match this target")
+    created = parse_utc(record["createdAt"], "Bootstrap lock createdAt")
+    renewed = parse_utc(record["renewedAt"], "Bootstrap lock renewedAt")
+    expires = parse_utc(record["expiresAt"], "Bootstrap lock expiresAt")
+    if renewed < created or expires <= renewed:
+        fail("Bootstrap lock timestamps are inconsistent")
+    return record
+
+
+def open_existing_bootstrap_lock(target):
+    path = bootstrap_lock_path(target)
+    if not target.regular_exists(path, "Bootstrap lock"):
+        fail("Bootstrap lock is missing: " + str(path))
+    flags = os.O_RDWR | (getattr(os, "O_BINARY", 0)) | (getattr(os, "O_NOFOLLOW", 0))
+    try:
+        if os.name == "nt":
+            import ctypes
+            import msvcrt
+            create_file = ctypes.windll.kernel32.CreateFileW
+            create_file.argtypes = [ctypes.c_wchar_p, ctypes.c_uint32, ctypes.c_uint32, ctypes.c_void_p, ctypes.c_uint32, ctypes.c_uint32, ctypes.c_void_p]
+            create_file.restype = ctypes.c_void_p
+            raw = create_file(str(path), 0x80000000 | 0x40000000, 0x00000001 | 0x00000002 | 0x00000004, None, 3, 0x00000080 | 0x00200000, None)
+            if raw in (None, ctypes.c_void_p(-1).value):
+                raise OSError(ctypes.get_last_error(), "CreateFileW failed")
+            handle = os.fdopen(msvcrt.open_osfhandle(raw, flags), "r+b", buffering=0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            handle = os.fdopen(os.open(path, flags), "r+b", buffering=0)
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return path, handle
+    except OSError as exc:
+        try: handle.close()
+        except UnboundLocalError: pass
+        fail("Bootstrap lock is busy or unavailable: " + str(exc), 1)
+
+
+def read_bootstrap_lock(handle, target, project_id):
+    handle.seek(0)
+    return validate_bootstrap_lock(parse_json(normalized_bytes(handle.read(), CONTROL + "/bootstrap.lock"), CONTROL + "/bootstrap.lock"), target, project_id)
+
+
+def bootstrap_stale_at(record):
+    renewed = parse_utc(record["renewedAt"], "Bootstrap lock renewedAt")
+    expires = parse_utc(record["expiresAt"], "Bootstrap lock expiresAt")
+    return max(expires, renewed + datetime.timedelta(seconds=BOOTSTRAP_STALE_SECONDS))
+
+
+def bootstrap_inspect_command(argv):
+    parser = argparse.ArgumentParser(description="Read and validate the project-local bootstrap lock without changing it.")
+    parser.add_argument("--target", default=".")
+    parser.add_argument("--project-id", required=True)
+    args = parser.parse_args(argv)
+    target = Target(args.target); _, handle = open_existing_bootstrap_lock(target)
+    try:
+        record = read_bootstrap_lock(handle, target, args.project_id)
+        stale_at = bootstrap_stale_at(record)
+        result = dict(record); result["staleAt"] = utc_text(stale_at); result["isStale"] = datetime.datetime.now(datetime.timezone.utc) >= stale_at
+        print(json.dumps(result, ensure_ascii=False, separators=(",", ":")))
+    finally: close_bootstrap_lock(handle)
+
+
+def bootstrap_parser(description, owner=True, expected=False):
+    parser = argparse.ArgumentParser(description=description)
+    parser.add_argument("--target", default=".")
+    parser.add_argument("--project-id", required=True)
+    if owner: parser.add_argument("--owner-id", required=True)
+    parser.add_argument("--thread-id")
+    parser.add_argument("--phase", required=True)
+    parser.add_argument("--lease-seconds", type=int, default=300)
+    if expected:
+        parser.add_argument("--expected-owner-id", required=True)
+        parser.add_argument("--expected-renewed-at", required=True)
+        parser.add_argument("--confirmed-owner-inactive", action="store_true")
+        parser.add_argument("--confirmed-orphaned-claim", action="store_true")
+    return parser
+
+
+def bootstrap_acquire_command(argv):
+    args = bootstrap_parser("Atomically create the project-local bootstrap lock.").parse_args(argv)
+    if not 1 <= args.lease_seconds <= 3600: raise SystemExit("--lease-seconds must be between 1 and 3600")
+    target = Target(args.target); path = bootstrap_lock_path(target); target.ensure_directory(path.parent)
+    flags = os.O_RDWR | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        handle = os.fdopen(os.open(path, flags, 0o600), "w+b", buffering=0)
+    except FileExistsError:
+        fail("Bootstrap lock already exists; normal acquire never takes over an active lock", 1)
+    try:
+        if os.name == "nt":
+            import msvcrt; handle.write(b"\0"); handle.flush(); os.fsync(handle.fileno()); handle.seek(0); msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl; fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        record = new_bootstrap_lock_record(target, args.project_id, args.owner_id, args.thread_id, args.phase, args.lease_seconds); write_bootstrap_lock(handle, record); print(json.dumps(record, ensure_ascii=False, separators=(",", ":")))
+    finally: close_bootstrap_lock(handle)
+
+
+def bootstrap_recover_command(argv):
+    args = bootstrap_parser("Recover only a verified stale bootstrap lock.", expected=True).parse_args(argv)
+    target = Target(args.target); _, handle = open_existing_bootstrap_lock(target)
+    try:
+        old = read_bootstrap_lock(handle, target, args.project_id)
+        if old["ownerId"] != identifier(args.expected_owner_id, "ExpectedOwnerId"): fail("Bootstrap lock owner does not match expected stale owner")
+        parse_utc(args.expected_renewed_at, "ExpectedRenewedAt")
+        if old["renewedAt"] != args.expected_renewed_at: fail("Bootstrap lock changed after inspection; refusing stale recovery")
+        stale_at = bootstrap_stale_at(old)
+        if datetime.datetime.now(datetime.timezone.utc) < stale_at: fail("Bootstrap lock is not stale enough to recover")
+        requested = identifier(args.thread_id, "ThreadId") if args.thread_id else None
+        if old["threadId"] is not None:
+            if not args.confirmed_owner_inactive: fail("Bound bootstrap recovery requires --confirmed-owner-inactive")
+            if args.confirmed_orphaned_claim: fail("A bound bootstrap lock cannot use orphan recovery")
+            if requested != old["threadId"]: fail("A bound bootstrap lock must recover the same thread")
+        elif requested is None:
+            if not args.confirmed_orphaned_claim: fail("Unbound zero-candidate recovery requires --confirmed-orphaned-claim")
+            if old["phase"] not in ("install", "installing"): fail("Only an unpublished install-phase lock can use orphan recovery")
+            if args.phase != "installing": fail("Orphan recovery must preserve the recoverable installing phase until the current task is bound")
+            if hub_path(target).exists(): fail("Hub registry exists; refusing orphan recovery")
+        else:
+            if not args.confirmed_owner_inactive: fail("Discovered claim recovery requires --confirmed-owner-inactive")
+            if args.confirmed_orphaned_claim: fail("A discovered claim thread must not use orphan recovery")
+        record = new_bootstrap_lock_record(target, args.project_id, args.owner_id, requested, args.phase, args.lease_seconds, old["replacement"]); write_bootstrap_lock(handle, record); print(json.dumps(record, ensure_ascii=False, separators=(",", ":")))
+    finally: close_bootstrap_lock(handle)
+
+
+def bootstrap_renew_command(argv):
+    args = bootstrap_parser("Renew and owner-authenticate the bootstrap lock thread/phase binding.").parse_args(argv)
+    target = Target(args.target); _, handle = open_existing_bootstrap_lock(target)
+    try:
+        record = read_bootstrap_lock(handle, target, args.project_id)
+        bound_thread = identifier(args.thread_id, "ThreadId") if args.thread_id else record["threadId"]
+        if record["ownerId"] != identifier(args.owner_id, "OwnerId") or (record["threadId"] is not None and record["threadId"] != bound_thread): fail("Bootstrap lock owner or thread does not match; refusing renewal")
+        now = datetime.datetime.now(datetime.timezone.utc); record["schemaVersion"] = 2; record["threadId"] = bound_thread; record["phase"] = identity_value(args.phase, "Phase"); record["renewedAt"] = utc_text(now); record["expiresAt"] = utc_text(now + datetime.timedelta(seconds=args.lease_seconds)); write_bootstrap_lock(handle, record); print(json.dumps(record, ensure_ascii=False, separators=(",", ":")))
+    finally: close_bootstrap_lock(handle)
+
+
+def bootstrap_release_command(argv):
+    parser = argparse.ArgumentParser(description="Release only the exact bootstrap lock owner."); parser.add_argument("--target", default="."); parser.add_argument("--project-id", required=True); parser.add_argument("--owner-id", required=True); parser.add_argument("--confirmed-replacement-retired", action="store_true"); args = parser.parse_args(argv)
+    target = Target(args.target); path, handle = open_existing_bootstrap_lock(target)
+    try:
+        record = read_bootstrap_lock(handle, target, args.project_id)
+        if record["ownerId"] != identifier(args.owner_id, "OwnerId"): fail("Bootstrap lock owner does not match; refusing release")
+        if record["replacement"] is not None:
+            if record["phase"] != "hub_replacement_retiring_old": fail("Hub replacement lock cannot be released before registry commit")
+            if not args.confirmed_replacement_retired: fail("Hub replacement release requires explicit confirmation that the exact old hub is retired")
+        path.unlink(); print('{"released":true}')
+    finally: close_bootstrap_lock(handle)
+
+
+def hub_snapshot(target, project_id):
+    path = hub_path(target)
+    if not target.regular_exists(path, "Hub registry"): fail("Hub registry is missing: " + str(path))
+    raw = path.read_bytes()
+    record = parse_json(normalized_bytes(raw, CONTROL + "/hub.json"), CONTROL + "/hub.json"); exact_object(record, ("schemaVersion", "projectId", "projectPath", "threadId", "hubTitle", "updatedAt"), "Hub registry")
+    identifier(record["projectId"], "Hub registry projectId")
+    identity_value(record["projectPath"], "Hub registry projectPath")
+    identifier(record["threadId"], "Hub registry threadId")
+    identity_value(record["hubTitle"], "Hub registry hubTitle")
+    if record["schemaVersion"] != 1 or record["projectId"] != identifier(project_id, "ProjectId") or not same_project_path(record["projectPath"], str(target.root)): fail("Hub registry binding is invalid")
+    parse_utc(record["updatedAt"], "Hub registry updatedAt")
+    return record, "sha256:" + hashlib.sha256(raw).hexdigest()
+
+
+def read_hub_registry(target, project_id):
+    return hub_snapshot(target, project_id)[0]
+
+
+def hub_result(snapshot, switched=False, already_committed=False):
+    record, token = snapshot
+    result = dict(record); result["registryToken"] = token; result["switched"] = switched; result["alreadyCommitted"] = already_committed
+    return result
+
+
+def hub_read_command(argv):
+    parser = argparse.ArgumentParser(description="Read and verify project hub registry."); parser.add_argument("--target", default="."); parser.add_argument("--project-id", required=True); args = parser.parse_args(argv)
+    print(json.dumps(hub_result(hub_snapshot(Target(args.target), args.project_id)), ensure_ascii=False, separators=(",", ":")))
+
+
+def hub_write_command(argv):
+    parser = argparse.ArgumentParser(description="Create a hub registry once, or return the identical thread binding."); parser.add_argument("--target", default="."); parser.add_argument("--project-id", required=True); parser.add_argument("--owner-id", required=True); parser.add_argument("--hub-thread-id", required=True); parser.add_argument("--hub-title", required=True); args = parser.parse_args(argv)
+    target = Target(args.target); _, handle = open_existing_bootstrap_lock(target)
+    try:
+        lease = read_bootstrap_lock(handle, target, args.project_id)
+        thread_id = identifier(args.hub_thread_id, "HubThreadId")
+        if lease["ownerId"] != identifier(args.owner_id, "OwnerId") or lease["threadId"] != thread_id or parse_utc(lease["expiresAt"], "Bootstrap lock expiresAt") < datetime.datetime.now(datetime.timezone.utc): fail("An active owner bootstrap lock bound to the hub thread is required to write the hub registry")
+        path = hub_path(target); record = {"schemaVersion":1,"projectId":identifier(args.project_id,"ProjectId"),"projectPath":str(target.root),"threadId":thread_id,"hubTitle":identity_value(args.hub_title,"HubTitle"),"updatedAt":utc_text()}
+        if path.exists():
+            existing = read_hub_registry(target, args.project_id)
+            if existing.get("threadId") != thread_id: fail("Hub registry already binds a different thread; refusing overwrite")
+            target.atomic_text(path, json.dumps(record,ensure_ascii=False,separators=(",",":"))+"\n")
+            print(json.dumps(read_hub_registry(target, args.project_id), ensure_ascii=False, separators=(",", ":")))
+            return
+        target.ensure_directory(path.parent)
+        temporary = path.with_name(path.name + ".project-flow-tmp-" + str(os.getpid()) + "-" + uuid.uuid4().hex[:8])
+        try:
+            fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os,"O_BINARY",0) | getattr(os,"O_NOFOLLOW",0), 0o600)
+            with os.fdopen(fd, "wb") as output: output.write((json.dumps(record,ensure_ascii=False,separators=(",",":"))+"\n").encode("utf-8")); output.flush(); os.fsync(output.fileno())
+            try: os.link(temporary, path)
+            except FileExistsError: fail("Hub registry appeared during atomic create; retry only to verify its existing thread binding", 1)
+        finally:
+            try: temporary.unlink()
+            except FileNotFoundError: pass
+        print(json.dumps(read_hub_registry(target, args.project_id), ensure_ascii=False, separators=(",", ":")))
+    finally: close_bootstrap_lock(handle)
+
+
+def hub_replacement_prepare_command(argv):
+    parser = argparse.ArgumentParser(description="Prepare an explicitly authorized current-task replacement of the exact inactive registered hub.")
+    parser.add_argument("--target", default="."); parser.add_argument("--project-id", required=True); parser.add_argument("--owner-id", required=True)
+    parser.add_argument("--expected-hub-thread-id", required=True); parser.add_argument("--expected-registry-token", required=True); parser.add_argument("--new-hub-thread-id", required=True); parser.add_argument("--hub-title", required=True)
+    parser.add_argument("--confirmed-old-hub-inactive", action="store_true"); parser.add_argument("--lease-seconds", type=int, default=300)
+    args = parser.parse_args(argv)
+    if not args.confirmed_old_hub_inactive: fail("Hub replacement prepare requires explicit confirmed inactive old hub evidence", 1)
+    if not 1 <= args.lease_seconds <= 3600: raise SystemExit("--lease-seconds must be between 1 and 3600")
+    target = Target(args.target); old = identifier(args.expected_hub_thread_id, "ExpectedHubThreadId"); new = identifier(args.new_hub_thread_id, "NewHubThreadId")
+    if old == new: fail("Replacement hub must differ from the registered old hub", 1)
+    if not re.fullmatch(r"sha256:[0-9a-f]{64}", args.expected_registry_token): fail("ExpectedRegistryToken must be a lowercase raw SHA-256 token", 1)
+    title = identity_value(args.hub_title, "HubTitle"); path = bootstrap_lock_path(target); target.ensure_directory(path.parent)
+    flags = os.O_RDWR | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try: handle = os.fdopen(os.open(path, flags, 0o600), "w+b", buffering=0)
+    except FileExistsError: fail("Bootstrap lock already exists; hub replacement never bypasses lock ownership", 1)
+    published = False
+    try:
+        if os.name == "nt":
+            import msvcrt; handle.write(b"\0"); handle.flush(); os.fsync(handle.fileno()); handle.seek(0); msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl; fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        snapshot = hub_snapshot(target, args.project_id)
+        if snapshot[0]["threadId"] != old or snapshot[1] != args.expected_registry_token: fail("Hub registry changed after authorization; refusing replacement prepare", 1)
+        evidence = {"expectedHubThreadId":old,"expectedRegistryToken":args.expected_registry_token,"newHubThreadId":new,"newHubTitle":title}
+        record = new_bootstrap_lock_record(target, args.project_id, args.owner_id, new, "hub_replacement_prepared", args.lease_seconds, evidence)
+        write_bootstrap_lock(handle, record); published = True; print(json.dumps(record, ensure_ascii=False, separators=(",", ":")))
+    except BaseException:
+        if not published:
+            try: path.unlink()
+            except FileNotFoundError: pass
+        raise
+    finally: close_bootstrap_lock(handle)
+
+
+def hub_replacement_commit_command(argv):
+    parser = argparse.ArgumentParser(description="Atomically replace only the exact registry token recorded by the replacement owner lock.")
+    parser.add_argument("--target", default="."); parser.add_argument("--project-id", required=True); parser.add_argument("--owner-id", required=True); args = parser.parse_args(argv)
+    target = Target(args.target); _, handle = open_existing_bootstrap_lock(target)
+    try:
+        lease = read_bootstrap_lock(handle, target, args.project_id)
+        if lease["ownerId"] != identifier(args.owner_id, "OwnerId"): fail("Bootstrap lock owner does not match; refusing hub replacement commit", 1)
+        evidence = lease["replacement"]
+        if evidence is None or lease["phase"] not in ("hub_replacement_prepared", "hub_replacement_retiring_old"): fail("Bootstrap lock does not contain a recoverable hub replacement", 1)
+        if parse_utc(lease["expiresAt"], "Bootstrap lock expiresAt") < datetime.datetime.now(datetime.timezone.utc): fail("Bootstrap lock expired; renew the exact replacement owner before commit", 1)
+        snapshot = hub_snapshot(target, args.project_id); already = False
+        if snapshot[0]["threadId"] == evidence["newHubThreadId"]:
+            already = True
+        elif snapshot[0]["threadId"] != evidence["expectedHubThreadId"] or snapshot[1] != evidence["expectedRegistryToken"]:
+            fail("Hub registry token or old hub changed; refusing replacement commit", 1)
+        else:
+            record = {"schemaVersion":1,"projectId":identifier(args.project_id,"ProjectId"),"projectPath":str(target.root),"threadId":identifier(evidence["newHubThreadId"],"NewHubThreadId"),"hubTitle":identity_value(evidence["newHubTitle"],"NewHubTitle"),"updatedAt":utc_text()}
+            target.atomic_text(hub_path(target), json.dumps(record,ensure_ascii=False,separators=(",",":"))+"\n")
+            snapshot = hub_snapshot(target, args.project_id)
+            if snapshot[0]["threadId"] != evidence["newHubThreadId"]: fail("Hub replacement commit did not persist the exact new hub", 1)
+        now = datetime.datetime.now(datetime.timezone.utc); lease["schemaVersion"] = 2; lease["phase"] = "hub_replacement_retiring_old"; lease["renewedAt"] = utc_text(now); lease["expiresAt"] = utc_text(now + datetime.timedelta(seconds=300)); write_bootstrap_lock(handle, lease)
+        print(json.dumps(hub_result(snapshot, not already, already), ensure_ascii=False, separators=(",", ":")))
+    finally: close_bootstrap_lock(handle)
+
+
 def current_contract():
     version = read_text(plugin_input("VERSION", "VERSION"), "VERSION").strip()
     reject_control(version, "VERSION")
     if not re.fullmatch(r"\d+\.\d+\.\d+", version):
         fail("VERSION must contain one SemVer version")
     managed = load_json(plugin_input("managed-files.json", "managed-files.json"), "managed-files.json")
-    if managed.get("schema_version") != 1 or managed.get("workflow_version") != version:
+    if managed.get("schema_version") != 1 or managed.get("workflow_version") != version or not isinstance(managed.get("retired_paths"), list):
         fail("managed-files.json schema or workflow_version does not match VERSION")
     entries = checked_entries(managed.get("files"), "managed-files.json", current=True)
+    current_paths = {item["path"] for item in entries}
+    retired = []
+    retired_seen = set()
+    for raw in managed["retired_paths"]:
+        relative = str(safe_relative(raw, "retired path"))
+        if relative in current_paths or relative in retired_seen:
+            fail("Retired path is active or duplicated: " + relative)
+        retired_seen.add(relative)
+        retired.append(relative)
     return version, entries, managed
 
 
@@ -352,7 +737,56 @@ def baseline_contract(version):
     return entries
 
 
-def validate_installation(target, allow_placeholders=False, quiet=False):
+def probe_command(argv):
+    parser = argparse.ArgumentParser(description="Read only the project-flow manifest entrypoint.")
+    parser.add_argument("target_positional", nargs="?")
+    parser.add_argument("--target")
+    args = parser.parse_args(argv)
+    target = Target(args.target or args.target_positional or ".")
+    manifest_path = target.path(MANIFEST_REL, allow_control=True)
+    if not manifest_path.exists():
+        print('{"managed":false}')
+        return
+    manifest = load_json(manifest_path, MANIFEST_REL)
+    version = manifest.get("workflow_version")
+    project_name = manifest.get("project_name")
+    files = manifest.get("files")
+    if manifest.get("schema_version") != 1 or not isinstance(version, str) or not re.fullmatch(r"\d+\.\d+\.\d+", version) or not isinstance(project_name, str) or not project_name.strip() or not isinstance(files, list):
+        fail("Manifest probe contract is invalid")
+    reject_control(project_name, "Manifest project name")
+    print(json.dumps({"managed": True, "workflow_version": version, "project_name": project_name, "managed_files": len(files), "last_transaction": manifest.get("last_transaction")}, ensure_ascii=False, separators=(",", ":")))
+
+
+def validate_markdown(path, label):
+    if path.suffix != ".md":
+        fail(label + " must use .md", 1)
+    first = None
+    previous = 0
+    fence = None
+    for line in read_text(path, label).split("\n"):
+        marker = re.match(r"^\s*(```|~~~)", line)
+        if marker:
+            token = marker.group(1)
+            fence = token if fence is None else None if fence == token else fence
+            continue
+        if fence is not None:
+            continue
+        heading = re.match(r"^(#{1,6})[ \t]+\S", line)
+        if not heading:
+            continue
+        level = len(heading.group(1))
+        if first is None:
+            first = level
+            if level != 1:
+                fail(label + " first heading must be #", 1)
+        elif level > previous + 1:
+            fail(label + " heading levels must not skip", 1)
+        previous = level
+    if first is None:
+        fail(label + " must contain a heading", 1)
+
+
+def validate_installation(target, allow_placeholders=False, quiet=False, runtime=False):
     version, entries, managed = current_contract()
     plugin = load_json(plugin_input(".codex-plugin/plugin.json", "plugin manifest"), "plugin manifest")
     plugin_version = str(plugin.get("version", ""))
@@ -362,32 +796,36 @@ def validate_installation(target, allow_placeholders=False, quiet=False):
     if len(expected_paths) != 6 or len(set(expected_paths)) != 6:
         fail("Current contract must contain exactly six managed files", 1)
 
+    retired_paths = set(managed["retired_paths"])
     historical = set()
-    baseline_root = PLUGIN_ROOT / "baselines"
-    for directory in sorted(baseline_root.iterdir()):
-        if not directory.is_dir():
-            continue
-        data = load_json(directory / "managed-files.json", "baseline " + directory.name)
-        if data.get("schema_version") != 1 or data.get("kind") != "managed_files_baseline" or data.get("workflow_version") != directory.name:
-            fail("Invalid baseline contract: " + directory.name, 1)
-        old_entries = checked_entries(data.get("files"), "baseline " + directory.name)
-        old_paths = set()
-        for item in old_entries:
-            relative = item["path"]
-            historical.add(relative)
-            old_paths.add(relative)
-            source = directory / relative
-            if not source.is_file() or source.is_symlink():
-                fail("Missing baseline file: " + directory.name + "/" + relative, 1)
-            if digest_file(source) != item.get("content_hash"):
-                fail("Baseline hash mismatch: " + directory.name + "/" + relative, 1)
-        actual = {path.relative_to(directory).as_posix() for path in directory.rglob("*") if path.is_file()} - {"managed-files.json"}
-        if actual != old_paths:
-            fail("Baseline tree does not match metadata: " + directory.name, 1)
+    if not runtime:
+        baseline_root = PLUGIN_ROOT / "baselines"
+        for directory in sorted(baseline_root.iterdir()):
+            if not directory.is_dir():
+                continue
+            data = load_json(directory / "managed-files.json", "baseline " + directory.name)
+            if data.get("schema_version") != 1 or data.get("kind") != "managed_files_baseline" or data.get("workflow_version") != directory.name:
+                fail("Invalid baseline contract: " + directory.name, 1)
+            old_entries = checked_entries(data.get("files"), "baseline " + directory.name)
+            old_paths = set()
+            for item in old_entries:
+                relative = item["path"]
+                historical.add(relative)
+                old_paths.add(relative)
+                source = directory / relative
+                if not source.is_file() or is_reparse(source.lstat()):
+                    fail("Missing baseline file: " + directory.name + "/" + relative, 1)
+                if digest_file(source) != item.get("content_hash"):
+                    fail("Baseline hash mismatch: " + directory.name + "/" + relative, 1)
+            actual = {path.relative_to(directory).as_posix() for path in directory.rglob("*") if path.is_file()} - {"managed-files.json"}
+            if actual != old_paths:
+                fail("Baseline tree does not match metadata: " + directory.name, 1)
+        if historical - set(expected_paths) != retired_paths:
+            fail("retired_paths does not match immutable baselines", 1)
 
     workflow_path = target.path(".agents/workflow.json")
     workflow = load_json(workflow_path, ".agents/workflow.json")
-    if set(workflow) != {"schema_version", "project", "paths", "tasks", "execution", "rotation", "upgrade"}:
+    if set(workflow) != {"schema_version", "project", "paths", "tasks", "requests", "execution", "documents", "bootstrap", "rotation", "upgrade"}:
         fail("workflow fields are invalid", 1)
     project = workflow.get("project")
     if not isinstance(project, dict) or set(project) != {"name"}:
@@ -400,90 +838,168 @@ def validate_installation(target, allow_placeholders=False, quiet=False):
         fail("workflow project placeholder was not rendered", 1)
     expected_fields = {
         "paths": {"project_state", "workflow_protocol"},
-        "tasks": {"max_active", "hub_occupies_slot", "blocked_waiting_queued_occupy_slot", "visible_execution_required", "hidden_subagents_may_substitute", "management_failure"},
-        "execution": {"parallel", "serial"},
-        "rotation": {"review_turn", "latest_turn", "key"},
-        "upgrade": {"protocol", "transaction_task_role", "discovery", "zero_active_fast_path", "reconcile", "barrier", "coordinator_claim", "transaction_key", "successor_key", "task_handshake", "hub_handshake", "observe", "recovery", "attempt_deadline_seconds"},
+        "tasks": {"max_active", "hub_occupies_slot", "blocked_waiting_queued_occupy_slot", "visible_execution_required", "hidden_subagents_may_substitute", "management_failure", "request_key"},
+        "requests": {"request_id_assignment", "states", "initial_state", "confirmation_fields", "completion_fields", "initial_owner", "handoff_boundary", "post_handoff_owner", "hub_post_handoff", "execution_task_binding", "acceptance_owner", "acceptance_archive", "rejection_route", "scope_change_route", "awaiting_acceptance_occupies_slot"},
+        "execution": {"same_task_actions", "supplemental_authorization", "different_goal", "scope_change", "replacement", "serial"},
+        "documents": {"default_extension", "standalone_cover", "first_heading", "heading_progression", "body_structures", "validation_scope", "review"},
+        "bootstrap": {"registry_path", "lock_path", "registry_schema", "lock_schema", "stale_after_seconds", "fast_path", "recovery_path", "title_identity", "unarchive", "lock_acquire", "lock_inspect", "existing_lock", "lock_release", "stale_recovery", "claim_title", "hub_replacement"},
+        "rotation": {"mode", "key"},
+        "upgrade": {"protocol", "transaction_task_role", "post_handoff_owner", "barrier_owner", "request_key", "discovery", "zero_active_fast_path", "reconcile", "barrier", "coordinator_claim", "transaction_key", "observe", "attempt_deadline_seconds"},
     }
     for section, expected in expected_fields.items():
         if not isinstance(workflow.get(section), dict) or set(workflow[section]) != expected:
             fail(section + " fields are invalid", 1)
     if set(workflow["upgrade"].get("observe", {})) != {"poll_scan_latest_turns", "include_outputs", "stable_terminal_snapshots", "poll_delays_seconds"}:
         fail("observe fields are invalid", 1)
-    if set(workflow["upgrade"].get("recovery", {})) != {"hub_followups", "successor_followups", "compensating_successors"}:
-        fail("recovery fields are invalid", 1)
     if not isinstance(workflow["upgrade"].get("discovery"), dict) or set(workflow["upgrade"]["discovery"]) != {"listing", "history", "fallback"}:
         fail("discovery fields are invalid", 1)
-    if not isinstance(workflow["upgrade"].get("reconcile"), dict) or set(workflow["upgrade"]["reconcile"]) != {"independent_pairs", "pair_order"}:
+    if not isinstance(workflow["upgrade"].get("reconcile"), dict) or set(workflow["upgrade"]["reconcile"]) != {"active_snapshot"}:
         fail("reconcile fields are invalid", 1)
     if not isinstance(workflow["upgrade"].get("barrier"), dict) or set(workflow["upgrade"]["barrier"]) != {"provisional", "active", "released", "cancelled"}:
         fail("barrier fields are invalid", 1)
+    if not isinstance(workflow["documents"].get("review"), dict) or set(workflow["documents"]["review"]) != {"required", "scope", "draft_delivery", "states", "initial_state", "approval_owner", "approval_evidence", "write_authorization", "rejection", "post_write_change"}:
+        fail("document review fields are invalid", 1)
     if not isinstance(workflow["upgrade"].get("zero_active_fast_path"), bool):
         fail("zero active fast path must be boolean", 1)
+    if not isinstance(workflow["bootstrap"].get("hub_replacement"), dict) or set(workflow["bootstrap"]["hub_replacement"]) != {"authorization", "registry_token", "prepare_command", "commit_command", "pre_cas_authority", "post_cas_authority", "old_hub_state", "new_hub_state", "ordinary_task_create", "retirement_order", "recovery", "third_hub", "key"}:
+        fail("hub replacement fields are invalid", 1)
     checks = [
-        (workflow.get("schema_version"), 6, "workflow schema"),
+        (workflow.get("schema_version"), 10, "workflow schema"),
         (workflow.get("paths", {}).get("project_state"), "docs/PROJECT_STATE.md", "project state path"),
         (workflow.get("paths", {}).get("workflow_protocol"), ".agents/WORKFLOW_PROTOCOL.md", "protocol path"),
-        (workflow.get("tasks", {}).get("max_active"), 5, "active task limit"),
+        (workflow.get("tasks", {}).get("max_active"), 1, "active task limit"),
         (workflow.get("tasks", {}).get("hub_occupies_slot"), False, "hub slot"),
         (workflow.get("tasks", {}).get("blocked_waiting_queued_occupy_slot"), True, "blocked task slot"),
         (workflow.get("tasks", {}).get("visible_execution_required"), True, "visible execution"),
         (workflow.get("tasks", {}).get("hidden_subagents_may_substitute"), False, "hidden substitute"),
         (workflow.get("tasks", {}).get("management_failure"), "stop", "management failure"),
-        (workflow.get("execution", {}).get("parallel"), ["non_conflicting"], "parallel execution"),
-        (workflow.get("execution", {}).get("serial"), ["high_risk", "external"], "serial execution"),
-        (workflow.get("rotation", {}).get("review_turn"), 6, "rotation review"),
-        (workflow.get("rotation", {}).get("latest_turn"), 10, "rotation latest"),
-        (workflow.get("rotation", {}).get("key"), "[codex-project-flow:execution:v1] projectId=<exactProjectId>; hubThreadId=<exactHubThreadId>; predecessorThreadId=<exactPredecessorThreadId>; generation=<positiveInteger>", "rotation key"),
-        (workflow.get("upgrade", {}).get("protocol"), 2, "upgrade protocol"),
+        (workflow.get("tasks", {}).get("request_key"), "[codex-project-flow:request:v1] projectId=<exactProjectId>; hubThreadId=<exactHubThreadId>; requestId=<exactRequestId>; generation=1", "request key"),
+        (workflow.get("requests", {}).get("request_id_assignment"), "hub_before_first_work_output", "request ID assignment"),
+        (workflow.get("requests", {}).get("states"), ["awaiting_authorization", "queued", "active", "awaiting_acceptance", "revision_pending", "accepted_archived"], "request states"),
+        (workflow.get("requests", {}).get("initial_state"), "awaiting_authorization", "request initial state"),
+        (workflow.get("requests", {}).get("confirmation_fields"), ["understanding", "execution_items"], "request confirmation fields"),
+        (workflow.get("requests", {}).get("completion_fields"), ["changes", "verification", "uncovered", "risk"], "request completion fields"),
+        (workflow.get("requests", {}).get("initial_owner"), "hub", "request initial owner"),
+        (workflow.get("requests", {}).get("handoff_boundary"), "exact_or_queued_execution_task_identity_established", "request handoff boundary"),
+        (workflow.get("requests", {}).get("post_handoff_owner"), "execution_task", "request post-handoff owner"),
+        (workflow.get("requests", {}).get("hub_post_handoff"), "no_participation_for_same_request", "request hub post-handoff"),
+        (workflow.get("requests", {}).get("execution_task_binding"), "one_exact_visible_task_per_request", "request task binding"),
+        (workflow.get("requests", {}).get("acceptance_owner"), "execution_task", "request acceptance owner"),
+        (workflow.get("requests", {}).get("acceptance_archive"), "exact_self_archive_success_and_matching_archived_task_id_required", "request acceptance archive"),
+        (workflow.get("requests", {}).get("rejection_route"), "execution_task_reconfirm_in_place", "request rejection route"),
+        (workflow.get("requests", {}).get("scope_change_route"), "execution_task_reconfirm_in_place", "request scope-change route"),
+        (workflow.get("requests", {}).get("awaiting_acceptance_occupies_slot"), True, "request acceptance slot"),
+        (workflow.get("execution", {}).get("same_task_actions"), ["inspect", "modify", "build", "test", "self_check", "evidence", "documentation", "commit", "push", "external"], "same task actions"),
+        (workflow.get("execution", {}).get("supplemental_authorization"), "continue_original_task", "supplemental authorization"),
+        (workflow.get("execution", {}).get("different_goal"), "queue_until_active_task_completes", "different goal"),
+        (workflow.get("execution", {}).get("scope_change"), "pause_for_execution_task_confirmation_then_continue_original_task", "scope change"),
+        (workflow.get("execution", {}).get("replacement"), "explicit_user_authorization", "replacement"),
+        (workflow.get("execution", {}).get("serial"), ["all_visible_execution"], "serial execution"),
+        (workflow.get("documents", {}).get("default_extension"), ".md", "document extension"),
+        (workflow.get("documents", {}).get("standalone_cover"), False, "document cover"),
+        (workflow.get("documents", {}).get("first_heading"), "#", "document first heading"),
+        (workflow.get("documents", {}).get("heading_progression"), "no_skipped_levels", "document heading progression"),
+        (workflow.get("documents", {}).get("body_structures"), ["paragraphs", "lists", "tables", "code_blocks"], "document body structures"),
+        (workflow.get("documents", {}).get("validation_scope"), "created_or_updated_delivery_documents", "document validation scope"),
+        (workflow.get("documents", {}).get("review", {}).get("required"), True, "document review required"),
+        (workflow.get("documents", {}).get("review", {}).get("scope"), "all_new_or_modified_markdown_documents", "document review scope"),
+        (workflow.get("documents", {}).get("review", {}).get("draft_delivery"), "complete_plain_text_in_chat_before_write", "document review draft"),
+        (workflow.get("documents", {}).get("review", {}).get("states"), ["draft_pending_review", "approved_for_write", "revision_required", "written"], "document review states"),
+        (workflow.get("documents", {}).get("review", {}).get("initial_state"), "draft_pending_review", "document review initial state"),
+        (workflow.get("documents", {}).get("review", {}).get("approval_owner"), "user", "document review owner"),
+        (workflow.get("documents", {}).get("review", {}).get("approval_evidence"), "explicit_user_chat_approval_bound_to_exact_path_and_content_sha256", "document review evidence"),
+        (workflow.get("documents", {}).get("review", {}).get("write_authorization"), "approved_exact_content_only", "document review write authorization"),
+        (workflow.get("documents", {}).get("review", {}).get("rejection"), "revise_complete_draft_and_resubmit", "document review rejection"),
+        (workflow.get("documents", {}).get("review", {}).get("post_write_change"), "return_to_draft_pending_review", "document review post-write change"),
+        (workflow.get("bootstrap", {}).get("registry_path"), ".project-flow/hub.json", "bootstrap registry path"),
+        (workflow.get("bootstrap", {}).get("lock_path"), ".project-flow/bootstrap.lock", "bootstrap lock path"),
+        (workflow.get("bootstrap", {}).get("registry_schema"), 1, "bootstrap registry schema"),
+        (workflow.get("bootstrap", {}).get("lock_schema"), 2, "bootstrap lock schema"),
+        (workflow.get("bootstrap", {}).get("stale_after_seconds"), 300, "bootstrap stale threshold"),
+        (workflow.get("bootstrap", {}).get("fast_path"), "registry_targeted_read", "bootstrap fast path"),
+        (workflow.get("bootstrap", {}).get("recovery_path"), "exhaustive_metadata_on_exception", "bootstrap recovery path"),
+        (workflow.get("bootstrap", {}).get("title_identity"), "saved_project_binding_plus_mutation_thread", "bootstrap title identity"),
+        (workflow.get("bootstrap", {}).get("unarchive"), "only_when_explicitly_archived", "bootstrap unarchive rule"),
+        (workflow.get("bootstrap", {}).get("lock_acquire"), "atomic_create_new", "bootstrap lock acquire"),
+        (workflow.get("bootstrap", {}).get("lock_inspect"), "validated_read_only", "bootstrap lock inspect"),
+        (workflow.get("bootstrap", {}).get("existing_lock"), "inspect_then_recover_or_stop", "bootstrap existing lock routing"),
+        (workflow.get("bootstrap", {}).get("lock_release"), "owner_claim_and_replacement_retirement_confirmation", "bootstrap lock release"),
+        (workflow.get("bootstrap", {}).get("stale_recovery"), "exact_token_cas_same_thread_or_install_orphan", "bootstrap stale recovery"),
+        (workflow.get("bootstrap", {}).get("claim_title"), "[cpf-claim] <shortClaimId>", "bootstrap claim title"),
+        (workflow.get("bootstrap", {}).get("hub_replacement", {}).get("authorization"), "explicit_current_task_replaces_exact_registry_hub", "hub replacement authorization"),
+        (workflow.get("bootstrap", {}).get("hub_replacement", {}).get("registry_token"), "sha256_raw_bytes", "hub replacement token"),
+        (workflow.get("bootstrap", {}).get("hub_replacement", {}).get("prepare_command"), "hub-replacement-prepare", "hub replacement prepare"),
+        (workflow.get("bootstrap", {}).get("hub_replacement", {}).get("commit_command"), "hub-replacement-commit", "hub replacement commit"),
+        (workflow.get("bootstrap", {}).get("hub_replacement", {}).get("pre_cas_authority"), "exact_registry_old_hub", "hub replacement pre-CAS authority"),
+        (workflow.get("bootstrap", {}).get("hub_replacement", {}).get("post_cas_authority"), "exact_registry_new_hub", "hub replacement post-CAS authority"),
+        (workflow.get("bootstrap", {}).get("hub_replacement", {}).get("old_hub_state"), "accessible_and_inactive", "hub replacement old state"),
+        (workflow.get("bootstrap", {}).get("hub_replacement", {}).get("new_hub_state"), "current_task_exact_id", "hub replacement new state"),
+        (workflow.get("bootstrap", {}).get("hub_replacement", {}).get("ordinary_task_create"), False, "hub replacement task creation"),
+        (workflow.get("bootstrap", {}).get("hub_replacement", {}).get("retirement_order"), ["versioned_retired_title", "unpin", "archive"], "hub replacement retirement"),
+        (workflow.get("bootstrap", {}).get("hub_replacement", {}).get("recovery"), "registry_authority_plus_lock_evidence", "hub replacement recovery"),
+        (workflow.get("bootstrap", {}).get("hub_replacement", {}).get("third_hub"), "forbidden", "hub replacement third hub"),
+        (workflow.get("bootstrap", {}).get("hub_replacement", {}).get("key"), "[codex-project-flow:hub-replacement:v1] projectId=<exactProjectId>; expectedOldHubThreadId=<exactOldHubThreadId>; newHubThreadId=<exactCurrentThreadId>; expectedRegistryToken=<exactRegistryToken>; ownerId=<exactOwnerId>", "hub replacement key"),
+        (workflow.get("rotation", {}).get("mode"), "explicit_user_authorization_only", "rotation mode"),
+        (workflow.get("rotation", {}).get("key"), "[codex-project-flow:execution:v3] projectId=<exactProjectId>; hubThreadId=<exactHubThreadId>; requestId=<exactRequestId>; predecessorThreadId=<exactPredecessorThreadId>; generation=<positiveInteger>", "rotation key"),
+        (workflow.get("upgrade", {}).get("protocol"), 3, "upgrade protocol"),
         (workflow.get("upgrade", {}).get("transaction_task_role"), "visible_coordinator_executor", "transaction task role"),
+        (workflow.get("upgrade", {}).get("post_handoff_owner"), "transaction_task", "upgrade post-handoff owner"),
+        (workflow.get("upgrade", {}).get("barrier_owner"), "transaction_task", "upgrade barrier owner"),
+        (workflow.get("upgrade", {}).get("request_key"), "[codex-project-flow:upgrade-request:v1] projectId=<exactProjectId>; hubThreadId=<exactHubThreadId>; requestId=<exactRequestId>; mode=<exactMode>; sourceVersion=<exactSourceVersion>; targetVersion=<exactTargetVersion>", "upgrade request key"),
         (workflow.get("upgrade", {}).get("discovery", {}).get("listing"), "exhaustive_metadata", "discovery listing"),
         (workflow.get("upgrade", {}).get("discovery", {}).get("history"), "targeted", "discovery history"),
         (workflow.get("upgrade", {}).get("discovery", {}).get("fallback"), "full_on_ambiguity", "discovery fallback"),
         (workflow.get("upgrade", {}).get("zero_active_fast_path"), True, "zero active fast path"),
-        (workflow.get("upgrade", {}).get("reconcile", {}).get("independent_pairs"), "parallel_within_available_slots", "independent reconciliation"),
-        (workflow.get("upgrade", {}).get("reconcile", {}).get("pair_order"), ["archive_predecessor", "create_successor", "verify_handshake"], "reconciliation pair order"),
+        (workflow.get("upgrade", {}).get("reconcile", {}).get("active_snapshot"), "empty_required_before_file_transaction_fail_closed", "active snapshot"),
         (workflow.get("upgrade", {}).get("barrier", {}).get("provisional"), "[codex-project-flow:upgrade-barrier:v1] state=provisional; projectId=<exactProjectId>; mode=<exactMode>; sourceVersion=<exactSourceVersion>; targetVersion=<exactTargetVersion>; claimId=<exactClaimId>", "provisional barrier"),
         (workflow.get("upgrade", {}).get("barrier", {}).get("active"), "[codex-project-flow:upgrade-barrier:v1] state=active; projectId=<exactProjectId>; coordinatorThreadId=<exactCoordinatorThreadId>; sourceVersion=<exactSourceVersion>; targetVersion=<exactTargetVersion>; generation=<positiveInteger>", "active barrier"),
         (workflow.get("upgrade", {}).get("barrier", {}).get("released"), "[codex-project-flow:upgrade-barrier:v1] state=released; projectId=<exactProjectId>; coordinatorThreadId=<exactCoordinatorThreadId>; sourceVersion=<exactSourceVersion>; targetVersion=<exactTargetVersion>; generation=<positiveInteger>", "released barrier"),
         (workflow.get("upgrade", {}).get("barrier", {}).get("cancelled"), "[codex-project-flow:upgrade-barrier:v1] state=cancelled; projectId=<exactProjectId>; mode=<exactMode>; sourceVersion=<exactSourceVersion>; targetVersion=<exactTargetVersion>; claimId=<exactClaimId>", "cancelled barrier"),
-        (workflow.get("upgrade", {}).get("coordinator_claim"), "[codex-project-flow:upgrade-claim:v1] projectId=<exactProjectId>; targetVersion=<exactTargetVersion>; claimId=<exactClaimId>", "coordinator claim"),
+        (workflow.get("upgrade", {}).get("coordinator_claim"), "[codex-project-flow:upgrade-claim:v2] projectId=<exactProjectId>; requestId=<exactRequestId>; coordinatorThreadId=<exactCoordinatorThreadId>; targetVersion=<exactTargetVersion>; claimId=<exactClaimId>", "coordinator claim"),
         (workflow.get("upgrade", {}).get("transaction_key"), "[codex-project-flow:upgrade:v1] projectId=<exactProjectId>; coordinatorThreadId=<exactCoordinatorThreadId>; sourceVersion=<exactSourceVersion>; targetVersion=<exactTargetVersion>; generation=<positiveInteger>", "transaction key"),
-        (workflow.get("upgrade", {}).get("successor_key"), "[codex-project-flow:execution:v2] projectId=<exactProjectId>; hubThreadId=<exactHubThreadId>; predecessorThreadId=<exactPredecessorThreadId>; generation=<positiveInteger>; workflowVersion=<exactWorkflowVersion>; upgradeTransaction=<exactUpgradeTransaction>", "successor key"),
-        (workflow.get("upgrade", {}).get("task_handshake"), "[codex-project-flow:handshake:v1] projectId=<exactProjectId>; hubThreadId=<exactHubThreadId>; workflowVersion=<exactWorkflowVersion>; upgradeTransaction=<exactUpgradeTransaction>; generation=<positiveInteger>", "task handshake"),
-        (workflow.get("upgrade", {}).get("hub_handshake"), "[codex-project-flow:hub-handshake:v1] projectId=<exactProjectId>; hubThreadId=<exactHubThreadId>; workflowVersion=<exactWorkflowVersion>; upgradeTransaction=<exactUpgradeTransaction>", "hub handshake"),
         (workflow.get("upgrade", {}).get("observe", {}).get("poll_scan_latest_turns"), 3, "poll scan"),
         (workflow.get("upgrade", {}).get("observe", {}).get("include_outputs"), False, "tool output"),
         (workflow.get("upgrade", {}).get("observe", {}).get("stable_terminal_snapshots"), 3, "terminal snapshots"),
         (workflow.get("upgrade", {}).get("observe", {}).get("poll_delays_seconds"), [1, 2], "poll delays"),
-        (workflow.get("upgrade", {}).get("recovery", {}).get("hub_followups"), 1, "hub followups"),
-        (workflow.get("upgrade", {}).get("recovery", {}).get("successor_followups"), 1, "successor followups"),
-        (workflow.get("upgrade", {}).get("recovery", {}).get("compensating_successors"), 1, "compensating successors"),
         (workflow.get("upgrade", {}).get("attempt_deadline_seconds"), 60, "attempt deadline"),
     ]
     for actual, expected, label in checks:
         if actual != expected:
             fail(label + " is invalid: " + repr(actual), 1)
 
-    expected_skills = sorted([
-        "bootstrap-project-flow/SKILL.md",
-        "bootstrap-project-flow/agents/openai.yaml",
-        "upgrade-project-flow/SKILL.md",
-        "upgrade-project-flow/agents/openai.yaml",
-        "upgrade-project-flow/references/coordination.md",
-        "upgrade-project-flow/references/file-transaction.md",
-    ])
-    actual_skills = sorted(path.relative_to(PLUGIN_ROOT / "skills").as_posix() for path in (PLUGIN_ROOT / "skills").rglob("*") if path.is_file())
-    if actual_skills != expected_skills:
-        fail("Plugin must contain exactly the six expected Skill files", 1)
+    if not runtime:
+        expected_skills = sorted([
+            "bootstrap-project-flow/SKILL.md",
+            "bootstrap-project-flow/agents/openai.yaml",
+            "upgrade-project-flow/SKILL.md",
+            "upgrade-project-flow/agents/openai.yaml",
+            "upgrade-project-flow/references/coordination.md",
+            "upgrade-project-flow/references/file-transaction.md",
+        ])
+        actual_skills = sorted(path.relative_to(PLUGIN_ROOT / "skills").as_posix() for path in (PLUGIN_ROOT / "skills").rglob("*") if path.is_file())
+        if actual_skills != expected_skills:
+            fail("Plugin must contain exactly the six expected Skill files", 1)
 
-    conflict_pattern = re.compile(r'任务管理(能力)?不可用时.{0,20}(回到|回退到)中枢|continue_in_hub|hub_execution_allowed|"hidden_subagents"\s*:\s*"may_substitute"|"(max_active_tasks|max_active)"\s*:\s*1', re.DOTALL)
-    for relative in ("AGENTS.md", ".agents", "docs"):
-        root = target.root / relative
-        files = [root] if root.is_file() else list(root.rglob("*")) if root.is_dir() else []
-        for path in files:
-            if path.is_file() and path.suffix in (".md", ".json") and conflict_pattern.search(read_text(path)):
-                fail("Conflicting workflow rule: " + str(path), 1)
+        conflict_pattern = re.compile(r'任务管理(能力)?不可用时.{0,20}(回到|回退到)中枢|continue_in_hub|hub_execution_allowed|"hidden_subagents"\s*:\s*"may_substitute"', re.DOTALL)
+        for relative in ("AGENTS.md", ".agents", "docs"):
+            root = target.root / relative
+            files = [root] if root.is_file() else list(root.rglob("*")) if root.is_dir() else []
+            for path in files:
+                if path.is_file() and path.suffix in (".md", ".json") and conflict_pattern.search(read_text(path)):
+                    fail("Conflicting workflow rule: " + str(path), 1)
+
+    for entry in entries:
+        live = target.path(entry["path"])
+        if not live.is_file() or is_reparse(live.lstat()):
+            fail("Installed managed file is missing or unsafe: " + entry["path"], 1)
+        if entry["path"].endswith(".md"):
+            validate_markdown(live, entry["path"])
+    if not runtime:
+        for relative in ("README.md", "docs/TEST_CASES.md", "templates/PROJECT_STATE.md", "skills/bootstrap-project-flow/SKILL.md", "skills/upgrade-project-flow/SKILL.md", "skills/upgrade-project-flow/references/coordination.md", "skills/upgrade-project-flow/references/file-transaction.md"):
+            validate_markdown(plugin_input(relative, "delivery Markdown"), relative)
+    for relative in retired_paths:
+        if target.path(relative).exists():
+            fail("Retired managed file remains: " + relative, 1)
 
     manifest_path = target.path(MANIFEST_REL, allow_control=True)
     if manifest_path.is_file():
@@ -508,12 +1024,6 @@ def validate_installation(target, allow_placeholders=False, quiet=False):
             expected_hash = digest_text(render(read_text(plugin_input(entry["source"], "managed source")), entry["render"], name))
             if record.get("baseline_hash") != expected_hash:
                 fail("Manifest baseline hash mismatch for " + relative, 1)
-            live = target.path(relative)
-            if not live.is_file() or live.is_symlink():
-                fail("Installed managed file is missing or unsafe: " + relative, 1)
-        for retired in historical - set(expected_paths):
-            if target.path(retired).exists():
-                fail("Retired managed file remains: " + retired, 1)
     if not quiet:
         print("Validation passed for " + str(target.root))
 
@@ -544,7 +1054,7 @@ def install_command(argv):
     legacy = not args.force and not manifest_existed and existing_managed
     if legacy and not args.dry_run:
         print("NOTICE Existing managed files were found without a manifest.")
-        print("NOTICE Files retain normal non-force skip behavior; use upgrade --adopt-from 0.2.0 to adopt them.")
+        print("NOTICE Files retain normal non-force skip behavior; manifest-free adoption is not supported.")
 
     stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     backup_relative = BACKUP_ROOT_NAME + "/" + stamp
@@ -619,7 +1129,7 @@ def install_command(argv):
         print("Backups: " + str(backup_root))
     if not args.force:
         try:
-            validate_installation(target, quiet=True)
+            validate_installation(target, quiet=True, runtime=True)
         except SystemExit:
             restore()
             raise
@@ -628,7 +1138,7 @@ def install_command(argv):
     if manifest_existed and not args.force:
         print("PRESERVE " + MANIFEST_REL + " (already exists)")
     elif legacy:
-        print("MANIFEST NOT INITIALIZED; run upgrade --adopt-from 0.2.0.")
+        print("MANIFEST NOT INITIALIZED; manifest-free adoption is not supported.")
     if initialize:
         if written != len(entries):
             restore()
@@ -655,7 +1165,7 @@ def install_command(argv):
         try:
             target.atomic_text(manifest_path, json.dumps(manifest, ensure_ascii=False, indent=2) + "\n")
             manifest_changed = True
-            validate_installation(target, quiet=True)
+            validate_installation(target, quiet=True, runtime=True)
         except BaseException:
             restore()
             raise
@@ -693,8 +1203,10 @@ class Upgrade:
                 fail("Unsupported manifest schema")
             if args.adopt_from:
                 fail("--adopt-from is only valid when the target has no manifest")
-        elif not args.rollback and args.adopt_from != "0.2.0":
-            fail("Missing .project-flow/manifest.json; explicitly pass --adopt-from 0.2.0 for a confirmed legacy deployment")
+        elif not args.rollback:
+            if args.adopt_from:
+                fail("Manifest-free adoption is no longer supported; the minimum supported upgrade is 0.8.3 with a valid manifest")
+            fail("Missing .project-flow/manifest.json; the minimum supported upgrade is 0.8.3 with a valid manifest")
 
     def path_set(self, version):
         return self.current_paths if version == self.version else {item["path"] for item in baseline_contract(version)}
@@ -716,7 +1228,7 @@ class Upgrade:
 
     def rollback(self, identifier, automatic=False):
         root = self.transaction_root(identifier)
-        if not root.is_dir() or root.is_symlink():
+        if not root.is_dir() or is_reparse(root.lstat()):
             fail("Transaction does not exist or is unsafe: " + identifier)
         meta_path = root / "transaction.json"
         meta_text = read_text(meta_path, "transaction.json")
@@ -753,7 +1265,7 @@ class Upgrade:
             live = self.target.path(relative)
             if not record.get("changed"):
                 continue
-            if live.exists() and (live.is_symlink() or not live.is_file()):
+            if live.exists() and (is_reparse(live.lstat()) or not live.is_file()):
                 fail("Rollback target is not a regular file: " + relative)
             current_hash = digest_file(live, relative) if live.is_file() else None
             if current_hash == record.get("applied_hash"):
@@ -778,7 +1290,7 @@ class Upgrade:
             if item["decision"] != "restore" or not record.get("existed"):
                 continue
             backup = self.target.path(CONTROL + "/transactions/" + identifier + "/backup/" + record["path"], allow_control=True)
-            backup_bytes = backup.read_bytes() if backup.is_file() and not backup.is_symlink() else fail("Backup is missing or unsafe for " + record["path"])
+            backup_bytes = backup.read_bytes() if backup.is_file() and not is_reparse(backup.lstat()) else fail("Backup is missing or unsafe for " + record["path"])
             if digest_text(normalized_bytes(backup_bytes, "backup for " + record["path"])) != record.get("original_hash"):
                 fail("Backup hash mismatch for " + record["path"])
             item["backup_bytes"] = backup_bytes
@@ -786,7 +1298,7 @@ class Upgrade:
         if restore_manifest:
             if meta.get("old_manifest_hash") is not None:
                 backup = self.target.path(CONTROL + "/transactions/" + identifier + "/backup/" + CONTROL + "/manifest.json", allow_control=True)
-                manifest_backup_bytes = backup.read_bytes() if backup.is_file() and not backup.is_symlink() else fail("Manifest backup is missing or unsafe")
+                manifest_backup_bytes = backup.read_bytes() if backup.is_file() and not is_reparse(backup.lstat()) else fail("Manifest backup is missing or unsafe")
                 if digest_text(normalized_bytes(manifest_backup_bytes, "manifest backup")) != meta.get("old_manifest_hash"):
                     fail("Manifest backup hash mismatch")
         if digest_file(meta_path, "transaction.json") != meta_hash:
@@ -822,18 +1334,10 @@ class Upgrade:
     def project_name(self):
         if self.args.project_name is not None:
             return validate_project_name(self.args.project_name)
-        if self.manifest is not None:
-            value = self.manifest.get("project_name")
-            if value is None and isinstance(self.manifest.get("project"), dict):
-                value = self.manifest["project"].get("name")
-            return validate_project_name(value)
-        workflow = self.target.path(".agents/workflow.json")
-        if workflow.is_file():
-            data = load_json(workflow, ".agents/workflow.json")
-            value = data.get("project", {}).get("name") if isinstance(data.get("project"), dict) else None
-            if value and value != "<PROJECT_NAME>":
-                return validate_project_name(value)
-        return validate_project_name(self.target.root.name)
+        value = self.manifest.get("project_name")
+        if value is None and isinstance(self.manifest.get("project"), dict):
+            value = self.manifest["project"].get("name")
+        return validate_project_name(value)
 
     def run(self):
         if self.args.rollback:
@@ -842,7 +1346,7 @@ class Upgrade:
             self.rollback(self.args.rollback)
             return
         project_name = self.project_name()
-        installed_version = self.args.adopt_from if self.manifest is None else self.manifest.get("workflow_version")
+        installed_version = self.manifest.get("workflow_version")
         reject_control(installed_version, "Installed workflow version")
         if not installed_version:
             fail("Manifest workflow_version is missing")
@@ -882,7 +1386,7 @@ class Upgrade:
         for entry in self.entries:
             relative = entry["path"]
             live = self.target.path(relative)
-            if live.exists() and (live.is_symlink() or not live.is_file()):
+            if live.exists() and (is_reparse(live.lstat()) or not live.is_file()):
                 fail("Managed target is not a regular file: " + relative)
             new_text = render(read_text(plugin_input(entry["source"], "managed source")), entry["render"], project_name)
             new_hash = digest_text(new_text)
@@ -924,7 +1428,7 @@ class Upgrade:
         for relative in sorted(removed):
             entry = removed[relative]
             live = self.target.path(relative)
-            if live.exists() and (live.is_symlink() or not live.is_file()):
+            if live.exists() and (is_reparse(live.lstat()) or not live.is_file()):
                 fail("Retired target is not a regular file: " + relative)
             baseline = plugin_input("baselines/" + installed_version + "/" + relative, "removed baseline")
             base_text = render(read_text(baseline), entry["render"], project_name)
@@ -971,7 +1475,7 @@ class Upgrade:
             print("Live managed files and manifest were not changed.", file=sys.stderr)
             raise SystemExit(4)
         if not changes and installed_version == self.version and self.manifest is not None:
-            validate_installation(self.target, quiet=True)
+            validate_installation(self.target, quiet=True, runtime=True)
             print("NOOP already up to date")
             return
         self.apply(plans, changes, removed, accepted, installed_version, project_name)
@@ -984,7 +1488,7 @@ class Upgrade:
             item = path.lstat()
         except FileNotFoundError:
             return None
-        if stat.S_ISLNK(item.st_mode) or not stat.S_ISREG(item.st_mode):
+        if is_reparse(item) or not stat.S_ISREG(item.st_mode):
             fail(label + " is not a safe regular file")
         return digest_file(path, label)
 
@@ -1002,7 +1506,7 @@ class Upgrade:
             fail("Refusing to discard a transaction outside the transaction root", 5)
         if not root.exists():
             return
-        if root.is_symlink() or not root.is_dir():
+        if is_reparse(root.lstat()) or not root.is_dir():
             fail("Refusing to discard an unsafe prepared transaction", 5)
         shutil.rmtree(root)
         self.remove_empty_parents(root)
@@ -1075,7 +1579,7 @@ class Upgrade:
                 fail("Written manifest last_transaction does not match the prepared transaction", 5)
             meta["state"] = "validating"
             self.target.atomic_text(meta_path, json.dumps(meta, ensure_ascii=False, indent=2) + "\n")
-            validate_installation(self.target, quiet=True)
+            validate_installation(self.target, quiet=True, runtime=True)
             meta["state"] = "applied"
             meta["validated_at_utc"] = datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
             self.target.atomic_text(meta_path, json.dumps(meta, ensure_ascii=False, indent=2) + "\n")
@@ -1120,13 +1624,34 @@ def validate_command(argv):
     parser.add_argument("target_positional", nargs="?")
     parser.add_argument("--target")
     parser.add_argument("--allow-placeholders", action="store_true")
+    parser.add_argument("--runtime", action="store_true", help="Validate only the installed contract and its declared paths")
     args = parser.parse_args(argv)
-    validate_installation(Target(args.target or args.target_positional or "."), args.allow_placeholders)
+    validate_installation(Target(args.target or args.target_positional or "."), args.allow_placeholders, runtime=args.runtime)
 
 
 try:
     reject_control(COMMAND, "Command")
-    if COMMAND == "install":
+    if COMMAND == "probe":
+        probe_command(ARGV)
+    elif COMMAND == "hub-read":
+        hub_read_command(ARGV)
+    elif COMMAND == "hub-write":
+        hub_write_command(ARGV)
+    elif COMMAND == "hub-replacement-prepare":
+        hub_replacement_prepare_command(ARGV)
+    elif COMMAND == "hub-replacement-commit":
+        hub_replacement_commit_command(ARGV)
+    elif COMMAND == "bootstrap-lock-inspect":
+        bootstrap_inspect_command(ARGV)
+    elif COMMAND == "bootstrap-lock-acquire":
+        bootstrap_acquire_command(ARGV)
+    elif COMMAND == "bootstrap-lock-renew":
+        bootstrap_renew_command(ARGV)
+    elif COMMAND == "bootstrap-lock-release":
+        bootstrap_release_command(ARGV)
+    elif COMMAND == "bootstrap-lock-recover":
+        bootstrap_recover_command(ARGV)
+    elif COMMAND == "install":
         install_command(ARGV)
     elif COMMAND == "upgrade":
         upgrade_command(ARGV)
