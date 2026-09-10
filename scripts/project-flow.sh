@@ -855,19 +855,21 @@ def validate_installation(target, allow_placeholders=False, quiet=False, runtime
         fail("discovery fields are invalid", 1)
     if not isinstance(workflow["upgrade"].get("reconcile"), dict) or set(workflow["upgrade"]["reconcile"]) != {"active_snapshot"}:
         fail("reconcile fields are invalid", 1)
-    if not isinstance(workflow["upgrade"].get("barrier"), dict) or set(workflow["upgrade"]["barrier"]) != {"provisional", "active", "released", "cancelled"}:
+    if not isinstance(workflow["upgrade"].get("barrier"), dict) or set(workflow["upgrade"]["barrier"]) != {"creation_gate", "provisional", "active", "released", "cancelled"}:
         fail("barrier fields are invalid", 1)
-    if not isinstance(workflow["documents"].get("review"), dict) or set(workflow["documents"]["review"]) != {"required", "scope", "draft_delivery", "states", "initial_state", "approval_owner", "approval_evidence", "write_authorization", "rejection", "post_write_change"}:
+    if not isinstance(workflow["documents"].get("review"), dict) or set(workflow["documents"]["review"]) != {"required", "scope", "draft_delivery", "states", "initial_state", "approval_owner", "approval_evidence", "write_authorization", "rejection", "post_write_change", "exceptions"}:
         fail("document review fields are invalid", 1)
+    if not isinstance(workflow["documents"]["review"].get("exceptions"), dict) or set(workflow["documents"]["review"]["exceptions"]) != {"bootstrap_managed_markdown", "upgrade_managed_markdown", "non_deployment_markdown"}:
+        fail("document review exception fields are invalid", 1)
     if not isinstance(workflow["upgrade"].get("zero_active_fast_path"), bool):
         fail("zero active fast path must be boolean", 1)
     if not isinstance(workflow["bootstrap"].get("hub_replacement"), dict) or set(workflow["bootstrap"]["hub_replacement"]) != {"authorization", "registry_token", "prepare_command", "commit_command", "pre_cas_authority", "post_cas_authority", "old_hub_state", "new_hub_state", "ordinary_task_create", "retirement_order", "recovery", "third_hub", "key"}:
         fail("hub replacement fields are invalid", 1)
     checks = [
-        (workflow.get("schema_version"), 10, "workflow schema"),
+        (workflow.get("schema_version"), 11, "workflow schema"),
         (workflow.get("paths", {}).get("project_state"), "docs/PROJECT_STATE.md", "project state path"),
         (workflow.get("paths", {}).get("workflow_protocol"), ".agents/WORKFLOW_PROTOCOL.md", "protocol path"),
-        (workflow.get("tasks", {}).get("max_active"), 1, "active task limit"),
+        (workflow.get("tasks", {}).get("max_active"), 5, "active task limit"),
         (workflow.get("tasks", {}).get("hub_occupies_slot"), False, "hub slot"),
         (workflow.get("tasks", {}).get("blocked_waiting_queued_occupy_slot"), True, "blocked task slot"),
         (workflow.get("tasks", {}).get("visible_execution_required"), True, "visible execution"),
@@ -891,10 +893,10 @@ def validate_installation(target, allow_placeholders=False, quiet=False, runtime
         (workflow.get("requests", {}).get("awaiting_acceptance_occupies_slot"), True, "request acceptance slot"),
         (workflow.get("execution", {}).get("same_task_actions"), ["inspect", "modify", "build", "test", "self_check", "evidence", "documentation", "commit", "push", "external"], "same task actions"),
         (workflow.get("execution", {}).get("supplemental_authorization"), "continue_original_task", "supplemental authorization"),
-        (workflow.get("execution", {}).get("different_goal"), "queue_until_active_task_completes", "different goal"),
+        (workflow.get("execution", {}).get("different_goal"), "parallel_when_disjoint_and_slot_available_else_queue", "different goal"),
         (workflow.get("execution", {}).get("scope_change"), "pause_for_execution_task_confirmation_then_continue_original_task", "scope change"),
         (workflow.get("execution", {}).get("replacement"), "explicit_user_authorization", "replacement"),
-        (workflow.get("execution", {}).get("serial"), ["all_visible_execution"], "serial execution"),
+        (workflow.get("execution", {}).get("serial"), ["same_request", "overlapping_paths", "upgrade_file_transaction"], "serial execution"),
         (workflow.get("documents", {}).get("default_extension"), ".md", "document extension"),
         (workflow.get("documents", {}).get("standalone_cover"), False, "document cover"),
         (workflow.get("documents", {}).get("first_heading"), "#", "document first heading"),
@@ -902,7 +904,7 @@ def validate_installation(target, allow_placeholders=False, quiet=False, runtime
         (workflow.get("documents", {}).get("body_structures"), ["paragraphs", "lists", "tables", "code_blocks"], "document body structures"),
         (workflow.get("documents", {}).get("validation_scope"), "created_or_updated_delivery_documents", "document validation scope"),
         (workflow.get("documents", {}).get("review", {}).get("required"), True, "document review required"),
-        (workflow.get("documents", {}).get("review", {}).get("scope"), "all_new_or_modified_markdown_documents", "document review scope"),
+        (workflow.get("documents", {}).get("review", {}).get("scope"), "all_new_or_modified_non_deployment_markdown_documents", "document review scope"),
         (workflow.get("documents", {}).get("review", {}).get("draft_delivery"), "complete_plain_text_in_chat_before_write", "document review draft"),
         (workflow.get("documents", {}).get("review", {}).get("states"), ["draft_pending_review", "approved_for_write", "revision_required", "written"], "document review states"),
         (workflow.get("documents", {}).get("review", {}).get("initial_state"), "draft_pending_review", "document review initial state"),
@@ -911,6 +913,9 @@ def validate_installation(target, allow_placeholders=False, quiet=False, runtime
         (workflow.get("documents", {}).get("review", {}).get("write_authorization"), "approved_exact_content_only", "document review write authorization"),
         (workflow.get("documents", {}).get("review", {}).get("rejection"), "revise_complete_draft_and_resubmit", "document review rejection"),
         (workflow.get("documents", {}).get("review", {}).get("post_write_change"), "return_to_draft_pending_review", "document review post-write change"),
+        (workflow.get("documents", {}).get("review", {}).get("exceptions", {}).get("bootstrap_managed_markdown"), "no_draft_review_for_install_or_recovery", "bootstrap Markdown review exception"),
+        (workflow.get("documents", {}).get("review", {}).get("exceptions", {}).get("upgrade_managed_markdown"), "no_draft_review_for_apply_resume_or_rollback", "upgrade Markdown review exception"),
+        (workflow.get("documents", {}).get("review", {}).get("exceptions", {}).get("non_deployment_markdown"), "normal_review_required", "non-deployment Markdown review"),
         (workflow.get("bootstrap", {}).get("registry_path"), ".project-flow/hub.json", "bootstrap registry path"),
         (workflow.get("bootstrap", {}).get("lock_path"), ".project-flow/bootstrap.lock", "bootstrap lock path"),
         (workflow.get("bootstrap", {}).get("registry_schema"), 1, "bootstrap registry schema"),
@@ -941,7 +946,7 @@ def validate_installation(target, allow_placeholders=False, quiet=False, runtime
         (workflow.get("bootstrap", {}).get("hub_replacement", {}).get("key"), "[codex-project-flow:hub-replacement:v1] projectId=<exactProjectId>; expectedOldHubThreadId=<exactOldHubThreadId>; newHubThreadId=<exactCurrentThreadId>; expectedRegistryToken=<exactRegistryToken>; ownerId=<exactOwnerId>", "hub replacement key"),
         (workflow.get("rotation", {}).get("mode"), "explicit_user_authorization_only", "rotation mode"),
         (workflow.get("rotation", {}).get("key"), "[codex-project-flow:execution:v3] projectId=<exactProjectId>; hubThreadId=<exactHubThreadId>; requestId=<exactRequestId>; predecessorThreadId=<exactPredecessorThreadId>; generation=<positiveInteger>", "rotation key"),
-        (workflow.get("upgrade", {}).get("protocol"), 3, "upgrade protocol"),
+        (workflow.get("upgrade", {}).get("protocol"), 4, "upgrade protocol"),
         (workflow.get("upgrade", {}).get("transaction_task_role"), "visible_coordinator_executor", "transaction task role"),
         (workflow.get("upgrade", {}).get("post_handoff_owner"), "transaction_task", "upgrade post-handoff owner"),
         (workflow.get("upgrade", {}).get("barrier_owner"), "transaction_task", "upgrade barrier owner"),
@@ -951,6 +956,7 @@ def validate_installation(target, allow_placeholders=False, quiet=False, runtime
         (workflow.get("upgrade", {}).get("discovery", {}).get("fallback"), "full_on_ambiguity", "discovery fallback"),
         (workflow.get("upgrade", {}).get("zero_active_fast_path"), True, "zero active fast path"),
         (workflow.get("upgrade", {}).get("reconcile", {}).get("active_snapshot"), "empty_required_before_file_transaction_fail_closed", "active snapshot"),
+        (workflow.get("upgrade", {}).get("barrier", {}).get("creation_gate"), "hub_exhaustive_check_blocks_on_provisional_and_active_before_every_creation", "upgrade creation gate"),
         (workflow.get("upgrade", {}).get("barrier", {}).get("provisional"), "[codex-project-flow:upgrade-barrier:v1] state=provisional; projectId=<exactProjectId>; mode=<exactMode>; sourceVersion=<exactSourceVersion>; targetVersion=<exactTargetVersion>; claimId=<exactClaimId>", "provisional barrier"),
         (workflow.get("upgrade", {}).get("barrier", {}).get("active"), "[codex-project-flow:upgrade-barrier:v1] state=active; projectId=<exactProjectId>; coordinatorThreadId=<exactCoordinatorThreadId>; sourceVersion=<exactSourceVersion>; targetVersion=<exactTargetVersion>; generation=<positiveInteger>", "active barrier"),
         (workflow.get("upgrade", {}).get("barrier", {}).get("released"), "[codex-project-flow:upgrade-barrier:v1] state=released; projectId=<exactProjectId>; coordinatorThreadId=<exactCoordinatorThreadId>; sourceVersion=<exactSourceVersion>; targetVersion=<exactTargetVersion>; generation=<positiveInteger>", "released barrier"),

@@ -1,7 +1,7 @@
 {
   "name": "codex-project-flow",
-  "version": "0.11.0+codex.20260831075733",
-  "description": "Install and safely upgrade a six-file schema-10 Codex workflow with one-time hub handoff, execution-task-owned acceptance and self-archival, reviewed Markdown writes, recoverable hub replacement, and transactional recovery.",
+  "version": "0.12.0+codex.20260905145745",
+  "description": "Install and safely upgrade a six-file schema-11 Codex workflow with up to five execution tasks, deployment Markdown review exemptions, execution-task-owned acceptance, recoverable hub replacement, and transactional recovery.",
   "author": {
     "name": "codex-project-flow contributors"
   },
@@ -15,7 +15,7 @@
   "interface": {
     "displayName": "Codex Project Flow",
     "shortDescription": "Bootstrap, upgrade, and reconcile a permanent project workflow.",
-    "longDescription": "Adopts a permanent project hub that starts each request once, then hands the full lifecycle to one visible execution task for clarification, reviewed Markdown writes, validation, acceptance, and exact self-archival. Supports recoverable hub replacement and upgrades only the invoking task's current project from immutable baselines.",
+    "longDescription": "Adopts a permanent project hub with up to five visible execution tasks, one per request. Authorized bootstrap and upgrade deployments write managed Markdown without draft review; ordinary document edits retain review. Supports execution-task-owned acceptance, recoverable hub replacement, and upgrades from immutable baselines.",
     "developerName": "codex-project-flow contributors",
     "category": "Productivity",
     "capabilities": [

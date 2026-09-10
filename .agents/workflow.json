@@ -1,12 +1,12 @@
 {
-  "schema_version": 10,
+  "schema_version": 11,
   "project": { "name": "<PROJECT_NAME>" },
   "paths": {
     "project_state": "docs/PROJECT_STATE.md",
     "workflow_protocol": ".agents/WORKFLOW_PROTOCOL.md"
   },
   "tasks": {
-    "max_active": 1,
+    "max_active": 5,
     "hub_occupies_slot": false,
     "blocked_waiting_queued_occupy_slot": true,
     "visible_execution_required": true,
@@ -34,10 +34,10 @@
   "execution": {
     "same_task_actions": ["inspect", "modify", "build", "test", "self_check", "evidence", "documentation", "commit", "push", "external"],
     "supplemental_authorization": "continue_original_task",
-    "different_goal": "queue_until_active_task_completes",
+    "different_goal": "parallel_when_disjoint_and_slot_available_else_queue",
     "scope_change": "pause_for_execution_task_confirmation_then_continue_original_task",
     "replacement": "explicit_user_authorization",
-    "serial": ["all_visible_execution"]
+    "serial": ["same_request", "overlapping_paths", "upgrade_file_transaction"]
   },
   "documents": {
     "default_extension": ".md",
@@ -48,7 +48,7 @@
     "validation_scope": "created_or_updated_delivery_documents",
     "review": {
       "required": true,
-      "scope": "all_new_or_modified_markdown_documents",
+      "scope": "all_new_or_modified_non_deployment_markdown_documents",
       "draft_delivery": "complete_plain_text_in_chat_before_write",
       "states": ["draft_pending_review", "approved_for_write", "revision_required", "written"],
       "initial_state": "draft_pending_review",
@@ -56,7 +56,12 @@
       "approval_evidence": "explicit_user_chat_approval_bound_to_exact_path_and_content_sha256",
       "write_authorization": "approved_exact_content_only",
       "rejection": "revise_complete_draft_and_resubmit",
-      "post_write_change": "return_to_draft_pending_review"
+      "post_write_change": "return_to_draft_pending_review",
+      "exceptions": {
+        "bootstrap_managed_markdown": "no_draft_review_for_install_or_recovery",
+        "upgrade_managed_markdown": "no_draft_review_for_apply_resume_or_rollback",
+        "non_deployment_markdown": "normal_review_required"
+      }
     }
   },
   "bootstrap": {
@@ -96,7 +101,7 @@
     "key": "[codex-project-flow:execution:v3] projectId=<exactProjectId>; hubThreadId=<exactHubThreadId>; requestId=<exactRequestId>; predecessorThreadId=<exactPredecessorThreadId>; generation=<positiveInteger>"
   },
   "upgrade": {
-    "protocol": 3,
+    "protocol": 4,
     "transaction_task_role": "visible_coordinator_executor",
     "post_handoff_owner": "transaction_task",
     "barrier_owner": "transaction_task",
@@ -111,6 +116,7 @@
       "active_snapshot": "empty_required_before_file_transaction_fail_closed"
     },
     "barrier": {
+      "creation_gate": "hub_exhaustive_check_blocks_on_provisional_and_active_before_every_creation",
       "provisional": "[codex-project-flow:upgrade-barrier:v1] state=provisional; projectId=<exactProjectId>; mode=<exactMode>; sourceVersion=<exactSourceVersion>; targetVersion=<exactTargetVersion>; claimId=<exactClaimId>",
       "active": "[codex-project-flow:upgrade-barrier:v1] state=active; projectId=<exactProjectId>; coordinatorThreadId=<exactCoordinatorThreadId>; sourceVersion=<exactSourceVersion>; targetVersion=<exactTargetVersion>; generation=<positiveInteger>",
       "released": "[codex-project-flow:upgrade-barrier:v1] state=released; projectId=<exactProjectId>; coordinatorThreadId=<exactCoordinatorThreadId>; sourceVersion=<exactSourceVersion>; targetVersion=<exactTargetVersion>; generation=<positiveInteger>",

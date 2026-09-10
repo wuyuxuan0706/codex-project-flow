@@ -136,10 +136,10 @@ fi
 cp "$tmp/manifest-original" "$manifest"
 "$python_cmd" - "$workflow" <<'PY'
 import json,pathlib,sys
-path=pathlib.Path(sys.argv[1]);value=json.loads(path.read_text(encoding="utf-8"));value["tasks"]["max_active"]=2;path.write_text(json.dumps(value,ensure_ascii=False,indent=2)+"\n",encoding="utf-8")
+path=pathlib.Path(sys.argv[1]);value=json.loads(path.read_text(encoding="utf-8"));value["tasks"]["max_active"]=1;path.write_text(json.dumps(value,ensure_ascii=False,indent=2)+"\n",encoding="utf-8")
 PY
 if "$engine" validate "$clean" >/dev/null 2>&1; then
-  echo "validator accepted max_active 2" >&2
+  echo "validator accepted max_active 1" >&2
   exit 1
 fi
 cp "$tmp/workflow-original" "$workflow"
@@ -178,6 +178,8 @@ mutations={
  "document":lambda: value["documents"].__setitem__("default_extension",".docx"),
  "document_review":lambda: value["documents"]["review"].__setitem__("required",False),
  "document_evidence":lambda: value["documents"]["review"].__setitem__("approval_evidence","unbound_chat_approval"),
+ "bootstrap_markdown_exception":lambda: value["documents"]["review"]["exceptions"].__setitem__("bootstrap_managed_markdown","review_required"),
+ "upgrade_markdown_exception":lambda: value["documents"]["review"]["exceptions"].__setitem__("upgrade_managed_markdown","review_required"),
  "rotation":lambda: value["rotation"].__setitem__("mode","automatic"),
  "snapshot":lambda: value["upgrade"]["reconcile"].__setitem__("active_snapshot","automatic"),
  "successor":lambda: value["upgrade"]["reconcile"].__setitem__("successor_creation","parallel"),
@@ -186,6 +188,7 @@ mutations={
  "successor_key":lambda: value["upgrade"].__setitem__("successor_key","retired"),
  "task_handshake":lambda: value["upgrade"].__setitem__("task_handshake","retired"),
  "barrier":lambda: value["upgrade"]["barrier"].__setitem__("active",value["upgrade"]["barrier"]["active"].replace("state=active","state=provisional")),
+ "creation_gate":lambda: value["upgrade"]["barrier"].__setitem__("creation_gate","active_only"),
 }
 mutations[kind]();path.write_text(json.dumps(value,ensure_ascii=False,indent=2)+"\n",encoding="utf-8")
 PY
@@ -224,6 +227,8 @@ reject_contract_mutation serial 'serial execution'
 reject_contract_mutation document 'document extension'
 reject_contract_mutation document_review 'document review required'
 reject_contract_mutation document_evidence 'document review evidence'
+reject_contract_mutation bootstrap_markdown_exception 'bootstrap Markdown review exception'
+reject_contract_mutation upgrade_markdown_exception 'upgrade Markdown review exception'
 reject_contract_mutation rotation 'rotation mode'
 reject_contract_mutation snapshot 'active snapshot'
 reject_contract_mutation successor 'reconcile fields are invalid'
@@ -232,6 +237,7 @@ reject_contract_mutation compensation 'upgrade fields are invalid'
 reject_contract_mutation successor_key 'upgrade fields are invalid'
 reject_contract_mutation task_handshake 'upgrade fields are invalid'
 reject_contract_mutation barrier 'active barrier'
+reject_contract_mutation creation_gate 'upgrade creation gate'
 cp "$tmp/workflow-original" "$workflow"
 mv "$tmp/contract-manifest" "$manifest"
 
@@ -260,7 +266,7 @@ root=pathlib.Path(sys.argv[1])/"baselines"
 print(" ".join(sorted((p.name for p in root.iterdir() if p.is_dir()),key=lambda x:tuple(map(int,x.split("."))))))
 PY
 )
-[ "$versions" = "0.8.3 0.9.0 0.9.1 0.10.0" ]
+[ "$versions" = "0.8.3 0.9.0 0.9.1 0.10.0 0.11.0" ]
 for version in $versions; do
   root="$tmp/plan-$version"
   fixture "$version" "plan-$version"
@@ -281,7 +287,7 @@ set -e
 [ "$unsupported_status" -ne 0 ]
 printf '%s\n' "$unsupported_error" | grep -Fq 'No supported migration from 0.8.2'
 
-for patch_version in 0.9.0 0.9.1 0.10.0; do
+for patch_version in 0.9.0 0.9.1 0.10.0 0.11.0; do
 patch_upgrade="$tmp/patch-upgrade-$patch_version"
 fixture "$patch_version" "patch-upgrade-$patch_version"
 cp -R "$patch_upgrade" "$tmp/patch-before-$patch_version"
@@ -678,12 +684,15 @@ fi
 for invariant in 'self.assert_preconditions(plans, old_manifest_hash)' 'Written manifest hash does not match the prepared transaction' 'automatic rollback also failed'; do
   grep -Fq "$invariant" "$repo/scripts/project-flow.sh"
 done
-grep -Fq '"schema_version": 10' "$repo/.agents/workflow.json"
-for request_contract in '"max_active": 1' '"request_key": "[codex-project-flow:request:v1] projectId=<exactProjectId>; hubThreadId=<exactHubThreadId>; requestId=<exactRequestId>; generation=1"' '"request_id_assignment": "hub_before_first_work_output"' '"states": ["awaiting_authorization", "queued", "active", "awaiting_acceptance", "revision_pending", "accepted_archived"]' '"confirmation_fields": ["understanding", "execution_items"]' '"completion_fields": ["changes", "verification", "uncovered", "risk"]' '"initial_owner": "hub"' '"handoff_boundary": "exact_or_queued_execution_task_identity_established"' '"post_handoff_owner": "execution_task"' '"hub_post_handoff": "no_participation_for_same_request"' '"acceptance_owner": "execution_task"' '"acceptance_archive": "exact_self_archive_success_and_matching_archived_task_id_required"' '"rejection_route": "execution_task_reconfirm_in_place"' '"scope_change_route": "execution_task_reconfirm_in_place"' '"awaiting_acceptance_occupies_slot": true' '"supplemental_authorization": "continue_original_task"' '"different_goal": "queue_until_active_task_completes"' '"scope_change": "pause_for_execution_task_confirmation_then_continue_original_task"' '"replacement": "explicit_user_authorization"' '"serial": ["all_visible_execution"]';do
+grep -Fq '"schema_version": 11' "$repo/.agents/workflow.json"
+for request_contract in '"max_active": 5' '"request_key": "[codex-project-flow:request:v1] projectId=<exactProjectId>; hubThreadId=<exactHubThreadId>; requestId=<exactRequestId>; generation=1"' '"request_id_assignment": "hub_before_first_work_output"' '"states": ["awaiting_authorization", "queued", "active", "awaiting_acceptance", "revision_pending", "accepted_archived"]' '"confirmation_fields": ["understanding", "execution_items"]' '"completion_fields": ["changes", "verification", "uncovered", "risk"]' '"initial_owner": "hub"' '"handoff_boundary": "exact_or_queued_execution_task_identity_established"' '"post_handoff_owner": "execution_task"' '"hub_post_handoff": "no_participation_for_same_request"' '"acceptance_owner": "execution_task"' '"acceptance_archive": "exact_self_archive_success_and_matching_archived_task_id_required"' '"rejection_route": "execution_task_reconfirm_in_place"' '"scope_change_route": "execution_task_reconfirm_in_place"' '"awaiting_acceptance_occupies_slot": true' '"supplemental_authorization": "continue_original_task"' '"different_goal": "parallel_when_disjoint_and_slot_available_else_queue"' '"scope_change": "pause_for_execution_task_confirmation_then_continue_original_task"' '"replacement": "explicit_user_authorization"' '"serial": ["same_request", "overlapping_paths", "upgrade_file_transaction"]';do
  grep -Fq "$request_contract" "$repo/.agents/workflow.json"
 done
-for document_contract in '"default_extension": ".md"' '"standalone_cover": false' '"first_heading": "#"' '"heading_progression": "no_skipped_levels"' '"validation_scope": "created_or_updated_delivery_documents"' '"required": true' '"scope": "all_new_or_modified_markdown_documents"' '"draft_delivery": "complete_plain_text_in_chat_before_write"' '"states": ["draft_pending_review", "approved_for_write", "revision_required", "written"]' '"approval_evidence": "explicit_user_chat_approval_bound_to_exact_path_and_content_sha256"' '"write_authorization": "approved_exact_content_only"';do
+for document_contract in '"default_extension": ".md"' '"standalone_cover": false' '"first_heading": "#"' '"heading_progression": "no_skipped_levels"' '"validation_scope": "created_or_updated_delivery_documents"' '"required": true' '"scope": "all_new_or_modified_non_deployment_markdown_documents"' '"draft_delivery": "complete_plain_text_in_chat_before_write"' '"states": ["draft_pending_review", "approved_for_write", "revision_required", "written"]' '"approval_evidence": "explicit_user_chat_approval_bound_to_exact_path_and_content_sha256"' '"write_authorization": "approved_exact_content_only"';do
  grep -Fq "$document_contract" "$repo/.agents/workflow.json"
+done
+for deployment_exception in '"bootstrap_managed_markdown": "no_draft_review_for_install_or_recovery"' '"upgrade_managed_markdown": "no_draft_review_for_apply_resume_or_rollback"' '"non_deployment_markdown": "normal_review_required"'; do
+ grep -Fq "$deployment_exception" "$repo/.agents/workflow.json"
 done
 for bootstrap_contract in '"registry_path": ".project-flow/hub.json"' '"lock_path": ".project-flow/bootstrap.lock"' '"fast_path": "registry_targeted_read"' '"recovery_path": "exhaustive_metadata_on_exception"' '"title_identity": "saved_project_binding_plus_mutation_thread"' '"unarchive": "only_when_explicitly_archived"' '"lock_inspect": "validated_read_only"' '"existing_lock": "inspect_then_recover_or_stop"' '"claim_title": "[cpf-claim] <shortClaimId>"';do
  grep -Fq "$bootstrap_contract" "$repo/.agents/workflow.json"
@@ -714,8 +723,27 @@ grep -Fq '"history": "targeted"' "$repo/.agents/workflow.json"
 grep -Fq '"fallback": "full_on_ambiguity"' "$repo/.agents/workflow.json"
 grep -Fq '"zero_active_fast_path": true' "$repo/.agents/workflow.json"
 grep -Fq '"mode": "explicit_user_authorization_only"' "$repo/.agents/workflow.json"
-grep -Fq '"protocol": 3' "$repo/.agents/workflow.json"
+grep -Fq '"protocol": 4' "$repo/.agents/workflow.json"
 grep -Fq '"active_snapshot": "empty_required_before_file_transaction_fail_closed"' "$repo/.agents/workflow.json"
+grep -Fq '"creation_gate": "hub_exhaustive_check_blocks_on_provisional_and_active_before_every_creation"' "$repo/.agents/workflow.json"
+"$python_cmd" - "$repo/.agents/workflow.json" <<'PY'
+import json,pathlib,sys
+workflow=json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8-sig"))
+occupying={"active","blocked","waiting","queued","awaiting_acceptance"}
+def can_materialize(states, existing_paths, requested_paths, barrier, scan_complete=True):
+    return (scan_complete and barrier not in {"provisional","active"}
+            and sum(state in occupying for state in states) < workflow["tasks"]["max_active"]
+            and not set(existing_paths).intersection(requested_paths))
+assert can_materialize(["active","blocked","waiting","queued"],["src/a.cpp"],["src/b.cpp"],None)
+assert not can_materialize(["active","blocked","waiting","queued","awaiting_acceptance"],["src/a.cpp"],["src/b.cpp"],None)
+assert not can_materialize(["active"],["src/shared.cpp"],["src/shared.cpp"],None)
+assert not can_materialize([],[],["src/new.cpp"],None,False), "incomplete barrier scan admitted a task"
+created=0
+for barrier in ("provisional","active"):
+    if can_materialize([],[],["src/new.cpp"],barrier): created+=1
+assert created==0, "upgrade creation barrier admitted a new execution task"
+assert can_materialize([],[],["src/new.cpp"],"released"), "released barrier did not resume task creation"
+PY
 grep -Fq '"provisional": "[codex-project-flow:upgrade-barrier:v1] state=provisional; projectId=<exactProjectId>; mode=<exactMode>; sourceVersion=<exactSourceVersion>; targetVersion=<exactTargetVersion>; claimId=<exactClaimId>"' "$repo/.agents/workflow.json"
 grep -Fq '"active": "[codex-project-flow:upgrade-barrier:v1] state=active; projectId=<exactProjectId>; coordinatorThreadId=<exactCoordinatorThreadId>; sourceVersion=<exactSourceVersion>; targetVersion=<exactTargetVersion>; generation=<positiveInteger>"' "$repo/.agents/workflow.json"
 grep -Fq '"released": "[codex-project-flow:upgrade-barrier:v1] state=released; projectId=<exactProjectId>; coordinatorThreadId=<exactCoordinatorThreadId>; sourceVersion=<exactSourceVersion>; targetVersion=<exactTargetVersion>; generation=<positiveInteger>"' "$repo/.agents/workflow.json"

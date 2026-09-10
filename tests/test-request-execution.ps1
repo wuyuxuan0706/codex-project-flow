@@ -15,7 +15,7 @@ function Get-ContentSha256([string]$Content) {
 }
 function New-Model {
     [ordered]@{
-        Requests=@{}; Active=$null
+        Requests=@{}; Active=$null; UpgradeBarrierState=$null; UpgradeBarrierScanComplete=$true
         Created=[Collections.Generic.List[string]]::new()
         Archived=[Collections.Generic.List[string]]::new()
         HubActions=[Collections.Generic.List[string]]::new()
@@ -36,7 +36,10 @@ function New-HubRequest($Model,[string]$RequestId,[string]$Understanding,[string
 function Confirm-HubRequest($Model,[string]$RequestId,[ValidateSet("exact","queued")][string]$IdentityKind="exact") {
     if (-not $Model.Requests.ContainsKey($RequestId)) { return $null }
     $request=$Model.Requests[$RequestId]
-    if ($request.State -cne "awaiting_authorization" -or $null -ne $request.ThreadId) { return $null }
+    if ($request.State -notin @("awaiting_authorization","queued") -or $null -ne $request.ThreadId) { return $null }
+    if (-not $Model.UpgradeBarrierScanComplete -or $Model.UpgradeBarrierState -in @("provisional","active")) {
+        $request.State="queued";$Model.HubActions.Add("$RequestId`:queued-by-upgrade-barrier");return $null
+    }
     $identity=if($IdentityKind-ceq"queued"){"client-$RequestId-g1"}else{"task-$RequestId-g1"}
     $request.ThreadId=$identity;$request.State=if($IdentityKind-ceq"queued"){"queued"}else{"active"}
     $Model.Created.Add($identity);$Model.HubActions.Add("$RequestId`:create-once:$IdentityKind")
@@ -103,11 +106,23 @@ function Start-UpgradeFileTransaction($Model,[object[]]$ActiveSnapshot) {
     if(@($ActiveSnapshot).Count-ne0){$Model.ExecutionActions.Add("$($Model.Active.ThreadId):upgrade-blocked-nonempty-snapshot");return $false}
     $Model.FileTransactions=[int]$Model.FileTransactions+1;$Model.ExecutionActions.Add("$($Model.Active.ThreadId):upgrade-file-transaction");$true
 }
+function Test-ExecutionCapacity([string[]]$States,[string[]]$ExistingPaths,[string[]]$RequestedPaths) {
+    $occupying=@("active","blocked","waiting","queued","awaiting_acceptance")
+    $occupied=@($States|Where-Object{$occupying-ccontains$_}).Count
+    $overlap=@($RequestedPaths|Where-Object{$ExistingPaths-ccontains$_}).Count-gt0
+    ($occupied -lt [int]$workflow.tasks.max_active) -and -not $overlap
+}
+function Test-ManagedMarkdownDeploymentException([string]$Mode,[bool]$ManagedPath) {
+    if(-not$ManagedPath){return $false}
+    if($Mode-ceq"bootstrap"){return $workflow.documents.review.exceptions.bootstrap_managed_markdown-ceq"no_draft_review_for_install_or_recovery"}
+    if($Mode-in@("apply","resume","rollback")){return $workflow.documents.review.exceptions.upgrade_managed_markdown-ceq"no_draft_review_for_apply_resume_or_rollback"}
+    $false
+}
 
 try {
     [IO.Directory]::CreateDirectory($temp)|Out-Null
-    Assert($workflow.schema_version-eq10) "request model requires schema 10"
-    Assert($workflow.tasks.max_active-eq1) "visible execution limit must be one"
+    Assert($workflow.schema_version-eq11) "request model requires schema 11"
+    Assert($workflow.tasks.max_active-eq5) "visible execution limit must be five"
     Assert($workflow.requests.initial_owner-ceq"hub") "hub must own only the initial phase"
     Assert($workflow.requests.handoff_boundary-ceq"exact_or_queued_execution_task_identity_established") "handoff boundary mismatch"
     Assert($workflow.requests.post_handoff_owner-ceq"execution_task") "execution task must own post-handoff lifecycle"
@@ -118,6 +133,21 @@ try {
     Assert($workflow.requests.scope_change_route-ceq"execution_task_reconfirm_in_place") "scope-change route mismatch"
     Assert($workflow.documents.review.required) "document review must be required"
     Assert((@($workflow.documents.review.states)-join",")-ceq"draft_pending_review,approved_for_write,revision_required,written") "document review states mismatch"
+    Assert(Test-ExecutionCapacity @("active","blocked","waiting","queued") @("src/a.cpp") @("src/b.cpp")) "four occupied slots did not permit an independent fifth request"
+    Assert(-not(Test-ExecutionCapacity @("active","blocked","waiting","queued","awaiting_acceptance") @("src/a.cpp") @("src/b.cpp"))) "sixth request bypassed the five-slot limit"
+    Assert(-not(Test-ExecutionCapacity @("active") @("src/shared.cpp") @("src/shared.cpp"))) "overlapping paths were allowed to run concurrently"
+    Assert(Test-ManagedMarkdownDeploymentException "bootstrap" $true) "bootstrap managed Markdown exception is missing"
+    foreach($mode in @("apply","resume","rollback")){Assert(Test-ManagedMarkdownDeploymentException $mode $true) "$mode managed Markdown exception is missing"}
+    Assert(-not(Test-ManagedMarkdownDeploymentException "apply" $false)) "deployment exception covered non-managed Markdown"
+    Assert(-not(Test-ManagedMarkdownDeploymentException "plan" $true)) "read-only plan incorrectly received a Markdown write exception"
+    $barrierModel=New-Model;[void](New-HubRequest $barrierModel "B1" "independent" @("inspect"));$barrierModel.UpgradeBarrierScanComplete=$false
+    Assert(($null -eq (Confirm-HubRequest $barrierModel "B1")) -and $barrierModel.Created.Count -eq 0) "incomplete barrier scan allowed a new execution task"
+    $barrierModel.UpgradeBarrierScanComplete=$true;$barrierModel.UpgradeBarrierState="provisional"
+    Assert(($null -eq (Confirm-HubRequest $barrierModel "B1")) -and $barrierModel.Created.Count -eq 0) "provisional barrier allowed a new execution task"
+    $barrierModel.UpgradeBarrierState="active"
+    Assert(($null -eq (Confirm-HubRequest $barrierModel "B1")) -and $barrierModel.Created.Count -eq 0) "active barrier allowed a new execution task"
+    $barrierModel.UpgradeBarrierState="released"
+    Assert(((Confirm-HubRequest $barrierModel "B1") -ceq "task-B1-g1") -and $barrierModel.Created.Count -eq 1) "released barrier did not resume queued task creation"
     Assert($workflow.upgrade.reconcile.active_snapshot-ceq"empty_required_before_file_transaction_fail_closed") "upgrade active snapshot must be empty before file transaction"
     foreach($retiredField in @("successor_key","task_handshake")){Assert($workflow.upgrade.PSObject.Properties.Name-cnotcontains$retiredField) "retired upgrade field remains: $retiredField"}
     foreach($retiredField in @("successor_creation","pair_order")){Assert($workflow.upgrade.reconcile.PSObject.Properties.Name-cnotcontains$retiredField) "retired reconcile field remains: $retiredField"}
@@ -187,5 +217,5 @@ try {
     Assert($upgradeModel.Created.Count-eq$createdBefore-and$upgradeModel.Active.ThreadId-ceq$upgradeTask) "non-empty active snapshot created a second task or replaced the upgrade task"
     Assert(Start-UpgradeFileTransaction $upgradeModel @()) "empty active snapshot did not permit the file transaction"
     Assert($upgradeModel.FileTransactions-eq1-and$upgradeModel.Created.Count-eq1-and$upgradeModel.Archived.Count-eq0) "empty-snapshot transaction changed task lifecycle"
-    Write-Host "Hub handoff, execution-task lifecycle, exact self-archive, and Markdown review tests passed."
+    Write-Host "Five-slot scheduling, hub handoff, deployment exception, ordinary Markdown review, and self-archive tests passed."
 } finally { if(Test-Path -LiteralPath $temp){Remove-Item -LiteralPath $temp -Recurse -Force} }

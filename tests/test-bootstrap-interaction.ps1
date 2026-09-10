@@ -248,7 +248,8 @@ $ambiguousClaim = Invoke-MockBootstrap @{ registry="missing"; installed=$true; l
 Assert ($ambiguousClaim.stopped -and $ambiguousClaim.lock_inspect -eq 1 -and $ambiguousClaim.lock_recover -eq 0 -and $ambiguousClaim.create -eq 0) "ambiguous stale claim was recovered or replaced"
 
 # Machine policy is the production contract consumed by the Skill.
-Assert ($workflow.schema_version -eq 10) "bootstrap interaction model requires workflow schema 10"
+Assert ($workflow.schema_version -eq 11) "bootstrap interaction model requires workflow schema 11"
+Assert ($workflow.documents.review.exceptions.bootstrap_managed_markdown -ceq "no_draft_review_for_install_or_recovery") "bootstrap managed Markdown deployment exception mismatch"
 Assert ($workflow.bootstrap.fast_path -eq "registry_targeted_read") "fast-path policy mismatch"
 Assert ($workflow.bootstrap.recovery_path -eq "exhaustive_metadata_on_exception") "recovery policy mismatch"
 Assert ($workflow.bootstrap.unarchive -eq "only_when_explicitly_archived") "unarchive policy mismatch"

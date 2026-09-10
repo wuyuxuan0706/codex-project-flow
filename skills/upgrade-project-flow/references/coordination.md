@@ -1,6 +1,6 @@
 # Upgrade coordination and recovery
 
-The permanent hub creates the one approved upgrade task and then exits that request's control flow. The upgrade task owns request identity, transaction identity, barrier state, plan, mutation, validation, document review, recovery, final acceptance, and exact self-archival.
+The permanent hub creates the one approved upgrade task and then exits that request's control flow. The upgrade task owns request identity, transaction identity, barrier state, plan, mutation, validation, non-deployment document review, recovery, final acceptance, and exact self-archival.
 
 Require exhaustive ordinary, pinned, and archived task metadata listing plus targeted history reading, title mutation, visible creation, messaging, waiting, and archiving. Missing or unmanageable capability stops before barrier activation, or preserves an already active barrier.
 
@@ -12,22 +12,20 @@ After verified apply, reread `AGENTS.md`, `.agents/workflow.json`, and `.agents/
 
 ## Claim, discovery, snapshot, and barrier
 
-1. The request has one UUID `requestId`, one task whose first raw line exactly matches `upgrade.request_key`, and one stable `claimId` for apply/rollback. A queued `clientThreadId` occupies the only slot and must never be recreated or passed to ID-only tools. Resume accepts only one materialized same-project task with that exact raw request-key first line; never regenerate identities, reuse the hub as executor, or guess an ID.
-2. The upgrade task generates the exact transaction key from trusted project, task, source/target version, and generation values, then activates and owns the barrier under that identity. Reuse request, claim, transaction, and barrier identities on resume.
-3. Exhaust every metadata page for ordinary, pinned, and archived tasks. Find the unique permanent hub and snapshot every other same-project visible active, blocked, waiting, or queued task except the hub and transaction task.
+1. The request has one UUID `requestId`, one task whose first raw line exactly matches `upgrade.request_key`, and one stable `claimId` for apply/rollback. A queued `clientThreadId` occupies one slot under the currently governing contract and must never be recreated or passed to ID-only tools. Resume accepts only one materialized same-project task with that exact raw request-key first line; never regenerate identities, reuse the hub as executor, or guess an ID.
+2. The upgrade task generates the exact transaction key from trusted project, task, source/target version, and generation values, then publishes and owns the provisional barrier under that identity before taking the activity snapshot. The hub treats provisional and active barriers as a creation gate and materializes no new execution task until released or cancelled. Reuse request, claim, transaction, and barrier identities on resume.
+3. With the provisional gate present, exhaust every metadata page for ordinary, pinned, and archived tasks. Find the unique permanent hub and snapshot every other same-project visible active, blocked, waiting, queued, or `awaiting_acceptance` task except the hub and transaction task.
 4. Read history only for the transaction task, snapshot tasks, and candidates whose identity or status is ambiguous. Disable tool outputs. If metadata is incomplete or targeted reads cannot resolve ambiguity, fall back to complete history pagination for every same-project task returned by exhaustive metadata listing.
-5. Require the activity snapshot to be empty before activating file mutation. Any snapshot task fails closed immediately: do not archive it, create or map a successor, activate the file transaction, or run the engine. Preserve the exact upgrade task and report the blocking task identities.
-6. Each blocking task must finish and self-archive in its own chat. After the only execution slot becomes available, continue the same upgrade task, exhaust metadata again, and proceed only when the new snapshot is empty. Then bind the barrier to that empty snapshot, read `file-transaction.md`, run the selected engine command, and validate the result itself.
+5. Require the activity snapshot to be empty before advancing the barrier to active and activating file mutation. Any snapshot task fails closed immediately: do not archive it, create or map a successor, activate the file transaction, or run the engine. Preserve the exact upgrade task and provisional barrier and report the blocking task identities.
+6. Each blocking task may finish and self-archive in its own chat; the creation gate does not block those existing tasks. After every other occupied slot is released, continue the same upgrade task, exhaust metadata again, and proceed only when the new snapshot is empty. Then advance the barrier to active, bind it to that empty snapshot, read `file-transaction.md`, run the selected engine command, and validate the result itself.
 
 For apply, require actual `APPLIED <transaction>`, validator success, target manifest version/paths, and matching `last_transaction`. For rollback, require actual `ROLLED_BACK <transaction>`, validator success under the restored version, matching target-owned transaction metadata, and exact restored manifest/files. Preserve raw engine evidence and exact transaction identity.
 
-## Document review
+## Managed Markdown deployment exception
 
-When the file plan contains Markdown writes, keep the same transaction task and active barrier while review is pending. Present every affected exact path and complete final plain-text draft before mutation, then wait for explicit user approval.
+After the user authorizes apply, resume, or rollback and the empty snapshot is proved, the same transaction task may let the engine write managed Markdown in its exact transaction plan without presenting drafts or collecting per-file approval. Apply this source-version exception even when the installed target contract still contains the older general Markdown gate; otherwise that older rule would prevent deployment of the new contract.
 
-Bind approval to `requestId`, exact path, review round, source contract, and content SHA-256. A changed merge result, accepted-local decision, rendered value, source content, target path, or resume mismatch invalidates the affected approval and returns it to `draft_pending_review`. Review remains in the same task and never repeats a completed file transaction.
-
-Document approval permits only the reviewed file content. It is independent of the empty-snapshot requirement, barrier release, and final request acceptance.
+The exception follows engine ownership and conflict policy and covers no extra path. Conflict decisions, accepted-local choices, changed scope/version, and non-managed Markdown remain separately confirmed. The exception does not relax the empty-snapshot requirement, barrier lifecycle, validation, or final request acceptance.
 
 ## Observe and reconcile
 
@@ -35,7 +33,7 @@ Use scan sizes, output settings, recovery limits, deadline, discovery mode, and 
 
 A nonempty snapshot is never reconciled by the upgrade task. Existing tasks remain untouched and finish under their own lifecycle. Waiting does not authorize mutation; after wake-up, the same upgrade task must rescan and prove empty occupancy before continuing.
 
-Release the barrier only after the verified transaction and final exhaustive metadata scan both match the empty-snapshot contract. Barrier release proves only upgrade coordination completion. The task then reports `changes`, `verification`, `uncovered`, and `risk` and enters `awaiting_acceptance`.
+Release the barrier only after the verified transaction and final exhaustive metadata scan both match the empty-snapshot contract. Cancel it only when mutation has not begun and the authorized operation is explicitly cancelled. The hub resumes materializing queued requests only after released/cancelled is visible. Barrier release proves only upgrade coordination completion. The task then reports `changes`, `verification`, `uncovered`, and `risk` and enters `awaiting_acceptance`.
 
 Rejection stays in the same task and starts revised understanding/execution-item confirmation. Acceptance authorizes the task to archive itself. Only `success=true` with `archivedTaskId` equal to the current exact task marks `accepted_archived`; failure or ambiguity remains `awaiting_acceptance`. No completion report, rejection feedback, acceptance decision, or archival is routed through the hub.
 
