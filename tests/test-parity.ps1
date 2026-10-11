@@ -15,6 +15,8 @@ function Assert-True([bool]$Condition, [string]$Message) {
     if (-not $Condition) { throw $Message }
 }
 
+Assert-True (([string]'.agents\workflow.json').Replace([char]92,[char]47) -ceq '.agents/workflow.json') "Windows-style relative path normalization failed"
+
 function Read-NormalizedText([string]$Path) {
     return (Get-Content -Raw -Encoding UTF8 -LiteralPath $Path).Replace("`r`n", "`n").Replace("`r", "`n")
 }
@@ -70,6 +72,7 @@ function Invoke-Process([string]$FileName, [string[]]$Arguments, [hashtable]$Env
 }
 
 function Find-PosixRuntime {
+    if ($env:OS -cne "Windows_NT") { return $null }
     $candidates = [Collections.Generic.List[string]]::new()
     foreach ($path in @(
         (Join-Path ${env:ProgramFiles} "Git/bin/bash.exe"),

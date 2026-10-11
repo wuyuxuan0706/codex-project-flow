@@ -9,8 +9,9 @@ function Text([string]$p){(Get-Content -Raw -Encoding UTF8 -LiteralPath $p).Repl
 function HashText([string]$v){$h=[Security.Cryptography.SHA256]::Create();try{"sha256:"+([BitConverter]::ToString($h.ComputeHash($utf8.GetBytes($v)))).Replace("-","").ToLowerInvariant()}finally{$h.Dispose()}}
 function Render([string]$v,[string]$m,[string]$n){if($m -eq "project_name"){return $v.Replace("<PROJECT_NAME>",$n)};if($m -eq "project_name_json"){return $v.Replace('"<PROJECT_NAME>"',(ConvertTo-Json $n -Compress))};$v}
 function WriteUtf8([string]$p,[string]$v){$d=Split-Path -Parent $p;if(-not (Test-Path $d)){[IO.Directory]::CreateDirectory($d)|Out-Null};[IO.File]::WriteAllText($p,$v,$utf8)}
-function TreeHashes([string]$r){$m=@{};Get-ChildItem $r -Recurse -File|Where-Object{$_.FullName-notmatch'[\\/].project-flow[\\/]transactions[\\/]'-and$_.FullName-notmatch'[\\/].project-flow[\\/]transaction\.lock$'}|ForEach-Object{$k=$_.FullName.Substring($r.Length).TrimStart('\').Replace('\','/');$m[$k]=(Get-FileHash -Algorithm SHA256 $_.FullName).Hash};$m}
+function TreeHashes([string]$r){$m=@{};Get-ChildItem $r -Recurse -File -Force|Where-Object{$_.FullName-notmatch'[\\/].project-flow[\\/]transactions[\\/]'-and$_.FullName-notmatch'[\\/].project-flow[\\/]transaction\.lock$'}|ForEach-Object{$k=$_.FullName.Substring($r.Length).TrimStart('\','/').Replace('\','/');$m[$k]=(Get-FileHash -Algorithm SHA256 $_.FullName).Hash};$m}
 function SameMap($a,$b){if($a.Count -ne $b.Count){return $false};foreach($k in $a.Keys){if(-not $b.ContainsKey($k) -or $a[$k] -cne $b[$k]){return $false}};$true}
+function Set-NativeExitCode([int]$Code){$hostPath=[Diagnostics.Process]::GetCurrentProcess().MainModule.FileName;& $hostPath -NoLogo -NoProfile -NonInteractive -Command "exit $Code"}
 $managed=Get-Content -Raw -Encoding UTF8 (Join-Path $repo managed-files.json)|ConvertFrom-Json
 $currentVersion=[string]$managed.workflow_version
 $currentPaths=@($managed.files.path)
@@ -53,20 +54,22 @@ try{
  [IO.Directory]::CreateDirectory($temp)|Out-Null
  foreach($s in @("project-flow.ps1","install.ps1","upgrade.ps1","validate.ps1")){[void][scriptblock]::Create((Get-Content -Raw -Encoding UTF8 (Join-Path $repo "scripts/$s")))}
  & $engine validate -Target $repo -AllowPlaceholders;$ok=$?;Assert $ok "engine source validation"
- cmd /c exit 37;Assert($LASTEXITCODE-eq37)"failed to preset LASTEXITCODE"
+ Set-NativeExitCode 37;Assert($LASTEXITCODE-eq37)"failed to preset LASTEXITCODE"
  & $engine validate -Target $repo -AllowPlaceholders;$ok=$?;Assert $ok "validation read stale LASTEXITCODE";Assert($LASTEXITCODE-eq0)"validation exit code"
  & (Join-Path $repo scripts/validate.ps1) -Target $repo -AllowPlaceholders;$ok=$?;Assert $ok "validate wrapper smoke"
  & (Join-Path $repo scripts/validate.ps1) -Target (Join-Path $temp missing) 2>$null;$ok=$?;Assert(-not $ok)"validate wrapper failure exit";Assert($LASTEXITCODE-eq1)"validate wrapper failure code"
  $clean=Join-Path $temp clean;[IO.Directory]::CreateDirectory($clean)|Out-Null
  & $engine install -Target $clean -ProjectName Clean;$ok=$?;Assert $ok "clean install"
- $probe=& $engine probe -Target $clean|ConvertFrom-Json;Assert($probe.managed-and$probe.workflow_version-ceq$currentVersion-and$probe.managed_files-eq6)"managed probe"
+ $probe=& $engine probe -Target $clean|ConvertFrom-Json;Assert($probe.managed-and$probe.workflow_version-ceq$currentVersion-and$probe.managed_files-eq8)"managed probe"
  $cleanLock=Join-Path $clean ".project-flow/transaction.lock";Remove-Item -LiteralPath $cleanLock -Force
  & $engine validate -Target $clean;$ok=$?;Assert $ok "clean validation";Assert(-not(Test-Path $cleanLock))"validation created transaction lock"
  & $engine upgrade -Target $clean -Apply -AcceptLocal ("bad"+[char]9+"path") 2>$null;$ok=$?;Assert(-not $ok)"upgrade accepted control character path"
- cmd /c exit 41;Assert($LASTEXITCODE-eq41)"failed to preset NOOP LASTEXITCODE"
+ Set-NativeExitCode 41;Assert($LASTEXITCODE-eq41)"failed to preset NOOP LASTEXITCODE"
  & $engine upgrade -Target $clean -Apply;$ok=$?;Assert $ok "NOOP upgrade read stale LASTEXITCODE";Assert($LASTEXITCODE-eq0)"NOOP upgrade exit code"
  $cm=Get-Content -Raw -Encoding UTF8 (Join-Path $clean .project-flow/manifest.json)|ConvertFrom-Json
- Assert($cm.workflow_version-ceq$currentVersion)"clean version";Assert(@($cm.files).Count-eq6)"managed count"
+ Assert($cm.workflow_version-ceq$currentVersion)"clean version";Assert(@($cm.files).Count-eq8)"managed count"
+ Assert(Test-Path (Join-Path $clean "docs/PROJECT_PLAN.md") -PathType Leaf) "clean install omitted project plan"
+ Assert(Test-Path (Join-Path $clean ".agents/skills/project-workflow-manager/scripts/project-memory.py") -PathType Leaf) "clean install omitted project memory helper"
  foreach($x in @(".agents/prompts/08_result_handoff.md",".agents/snippets/AGENTS.integration.md","docs/WORKFLOW_GUIDE.md","docs/DEVELOPMENT_SOP.md")){Assert (-not (Test-Path (Join-Path $clean $x))) "clean retired file"}
  $bounded=Join-Path $temp bounded;[IO.Directory]::CreateDirectory((Join-Path $bounded "docs/unrelated"))|Out-Null;WriteUtf8 (Join-Path $bounded "docs/unrelated/conflict.md") "任务管理不可用时回到中枢"
  $probe=& $engine probe -Target $bounded|ConvertFrom-Json;Assert(-not$probe.managed)"unmanaged probe"
@@ -77,8 +80,9 @@ try{
  $unsafe=Join-Path $temp unsafe-reparse;& $engine install -Target ([IO.Directory]::CreateDirectory($unsafe).FullName) -ProjectName Unsafe;$ok=$?;Assert $ok "unsafe fixture install"
  $unsafeAgents=Join-Path $unsafe ".agents";$outsideAgents=Join-Path $temp "unsafe-reparse-target";Move-Item -LiteralPath $unsafeAgents -Destination $outsideAgents
  try{
-  $junction=New-Item -ItemType Junction -Path $unsafeAgents -Target $outsideAgents -Force
-  Assert((($junction.Attributes-band[IO.FileAttributes]::ReparsePoint)-ne0))"junction fixture is not a reparse point"
+  $linkType=if($env:OS-ceq"Windows_NT"){"Junction"}else{"SymbolicLink"}
+  $junction=New-Item -ItemType $linkType -Path $unsafeAgents -Target $outsideAgents -Force
+  Assert((($junction.Attributes-band[IO.FileAttributes]::ReparsePoint)-ne0))"link fixture is not a reparse point"
   & $engine validate -Target $unsafe -Runtime 2>$null;$ok=$?;Assert(-not$ok)"runtime validation accepted a managed path through a junction"
  }finally{if(Test-Path -LiteralPath $unsafeAgents){Remove-Item -LiteralPath $unsafeAgents -Force};Move-Item -LiteralPath $outsideAgents -Destination $unsafeAgents}
  $wp=Join-Path $clean .agents/workflow.json;$original=Text $wp;WriteUtf8 $wp ($original.Replace('"max_active": 5','"max_active": 1'))
@@ -94,11 +98,14 @@ try{
   [pscustomobject]@{Name="discovery fallback";Expected="discovery-fallback";Mutate={param($v)$v.upgrade.discovery.fallback="never"}},
   [pscustomobject]@{Name="request identity";Expected="request-key";Mutate={param($v)$v.tasks.request_key=$v.tasks.request_key.Replace("requestId=<exactRequestId>; ","")}},
   [pscustomobject]@{Name="request ID timing";Expected="request-id-assignment";Mutate={param($v)$v.requests.request_id_assignment="after_task_creation"}},
+  [pscustomobject]@{Name="request states";Expected="request-states";Mutate={param($v)$v.requests.states=@($v.requests.states[0..($v.requests.states.Count-2)])}},
   [pscustomobject]@{Name="request initial owner";Expected="request-initial-owner";Mutate={param($v)$v.requests.initial_owner="execution_task"}},
   [pscustomobject]@{Name="request handoff boundary";Expected="request-handoff-boundary";Mutate={param($v)$v.requests.handoff_boundary="after_completion"}},
   [pscustomobject]@{Name="request post-handoff owner";Expected="request-post-handoff-owner";Mutate={param($v)$v.requests.post_handoff_owner="hub"}},
   [pscustomobject]@{Name="hub post-handoff";Expected="request-hub-post-handoff";Mutate={param($v)$v.requests.hub_post_handoff="route_messages"}},
+  [pscustomobject]@{Name="request task binding";Expected="request-task-binding";Mutate={param($v)$v.requests.execution_task_binding="one_exact_visible_task_per_request"}},
   [pscustomobject]@{Name="request acceptance owner";Expected="request-acceptance-owner";Mutate={param($v)$v.requests.acceptance_owner="coordinator"}},
+  [pscustomobject]@{Name="request acceptance archive";Expected="request-acceptance-archive";Mutate={param($v)$v.requests.acceptance_archive="archive_without_memory_sync"}},
   [pscustomobject]@{Name="request rejection route";Expected="request-rejection-route";Mutate={param($v)$v.requests.rejection_route="create_new_task"}},
   [pscustomobject]@{Name="request scope-change route";Expected="request-scope-change-route";Mutate={param($v)$v.requests.scope_change_route="return_to_hub"}},
   [pscustomobject]@{Name="request acceptance slot";Expected="request-acceptance-slot";Mutate={param($v)$v.requests.awaiting_acceptance_occupies_slot=$false}},
@@ -108,11 +115,17 @@ try{
   [pscustomobject]@{Name="replacement authorization";Expected="replacement";Mutate={param($v)$v.execution.replacement="automatic"}},
   [pscustomobject]@{Name="visible execution serialization";Expected="execution-serial";Mutate={param($v)$v.execution.serial=@("high_risk")}},
   [pscustomobject]@{Name="Markdown extension";Expected="document-extension";Mutate={param($v)$v.documents.default_extension=".docx"}},
-  [pscustomobject]@{Name="document review required";Expected="document-review-required";Mutate={param($v)$v.documents.review.required=$false}},
-  [pscustomobject]@{Name="document approval evidence";Expected="document-review-evidence";Mutate={param($v)$v.documents.review.approval_evidence="chat_approval_without_binding"}},
-  [pscustomobject]@{Name="bootstrap Markdown review exception";Expected="bootstrap-markdown-review-exception";Mutate={param($v)$v.documents.review.exceptions.bootstrap_managed_markdown="review_required"}},
-  [pscustomobject]@{Name="upgrade Markdown review exception";Expected="upgrade-markdown-review-exception";Mutate={param($v)$v.documents.review.exceptions.upgrade_managed_markdown="review_required"}},
+  [pscustomobject]@{Name="memory acceptance gate";Expected="project-memory-step-completion";Mutate={param($v)$v.project_memory.step_completion="automatic"}},
+  [pscustomobject]@{Name="planning creation";Expected="planning-creation";Mutate={param($v)$v.planning.creation="create_then_record"}},
+  [pscustomobject]@{Name="planning interview";Expected="planning-interview";Mutate={param($v)$v.planning.interview="passive_questionnaire"}},
+  [pscustomobject]@{Name="planning interview rules";Expected="planning-interview-rules";Mutate={param($v)$v.planning.interview_rules="docs/PROJECT_PLAN.md"}},
+  [pscustomobject]@{Name="planning interview memory";Expected="planning-interview-memory";Mutate={param($v)$v.planning.interview_memory="summary_only"}},
+  [pscustomobject]@{Name="planning interview completion";Expected="planning-interview-completion";Mutate={param($v)$v.planning.interview_completion="model_decides"}},
+  [pscustomobject]@{Name="planning continuation request id";Expected="planning-continuation-request-id";Mutate={param($v)$v.planning.continuation_request_id="random_each_time"}},
+  [pscustomobject]@{Name="planning continuation key";Expected="planning-continuation-key";Mutate={param($v)$v.planning.continuation_key="title_only"}},
   [pscustomobject]@{Name="rotation authorization";Expected="rotation-mode";Mutate={param($v)$v.rotation.mode="automatic"}},
+  [pscustomobject]@{Name="rotation context threshold";Expected="rotation-context-threshold";Mutate={param($v)$v.rotation.context_threshold=80}},
+  [pscustomobject]@{Name="rotation continuation";Expected="rotation-continue";Mutate={param($v)$v.rotation.continue="archive_then_create"}},
   [pscustomobject]@{Name="reconcile authorization";Expected="reconcile-active-snapshot";Mutate={param($v)$v.upgrade.reconcile.active_snapshot="automatic"}},
   [pscustomobject]@{Name="retired reconcile successor";Expected="reconcile-fields";Mutate={param($v)$v.upgrade.reconcile|Add-Member -NotePropertyName successor_creation -NotePropertyValue "parallel"}},
   [pscustomobject]@{Name="retired reconcile pair order";Expected="reconcile-fields";Mutate={param($v)$v.upgrade.reconcile|Add-Member -NotePropertyName pair_order -NotePropertyValue @("archive_predecessor","queue_successor")}},
@@ -128,7 +141,7 @@ try{
  & $engine install -Target $failedInstall -ProjectName FailedInstall 2>$null;$ok=$?;Assert(-not $ok)"post-manifest validation failure unexpectedly succeeded";Assert(-not(Test-Path(Join-Path $failedInstall ".project-flow/manifest.json")))"failed install left manifest"
  foreach($path in @($currentPaths|Where-Object{$_-cne'.agents/workflow.json'})){Assert(-not(Test-Path(Join-Path $failedInstall $path)))"failed install left managed file $path"};Assert((Text $invalidWorkflow)-ceq"{}")"failed install changed preexisting invalid workflow"
  $versions=@(Get-ChildItem -LiteralPath (Join-Path $repo baselines) -Directory|Where-Object{$_.Name-match'^\d+\.\d+\.\d+$'}|Sort-Object{[version]$_.Name}|ForEach-Object Name)
- Assert(($versions-join',')-ceq'0.8.3,0.9.0,0.9.1,0.10.0,0.11.0')"unexpected retained baselines"
+ Assert(($versions-join',')-ceq'0.8.3,0.9.0,0.9.1,0.10.0,0.11.0,0.12.0,0.13.0')"unexpected retained baselines"
  foreach($version in $versions){
   $f=New-Fixture $version ("plan-"+$version.Replace(".","-"));$plan=& $engine plan -Target $f *>&1|Out-String
   $ok=$?;Assert $ok "$version plan";Assert($plan.Contains("UPGRADE $version -> $currentVersion"))"$version target"
@@ -138,8 +151,32 @@ try{
  }
  $unsupported=New-Fixture "0.8.3" unsupported;$unsupportedManifestPath=Join-Path $unsupported ".project-flow/manifest.json";$unsupportedManifest=Get-Content -Raw -Encoding UTF8 $unsupportedManifestPath|ConvertFrom-Json;$unsupportedManifest.workflow_version="0.8.2";WriteUtf8 $unsupportedManifestPath (($unsupportedManifest|ConvertTo-Json -Depth 20)+[char]10)
  $unsupportedError=& $engine plan -Target $unsupported 2>&1|Out-String;$ok=$?;Assert(-not$ok)"unsupported source version was accepted";Assert($unsupportedError.Contains("No supported migration from 0.8.2"))"unsupported source rejection reason missing"
- $liveRace=New-Fixture "0.8.3" live-race;$liveRaceManifest=Text(Join-Path $liveRace ".project-flow/manifest.json");$race=Invoke-ApplyRace $liveRace live;Assert $race.Changed "live race hook did not run";Assert($race.ExitCode-eq1)"live race apply exit";Assert((Text(Join-Path $liveRace "AGENTS.md")).Contains("RACE-LIVE"))"live race content was overwritten";Assert((Text(Join-Path $liveRace ".project-flow/manifest.json"))-ceq$liveRaceManifest)"live race changed manifest";Assert($race.Error.Contains("changed after planning"))"live race reason missing"
- $manifestRace=New-Fixture "0.8.3" manifest-race;$manifestRaceAgents=Text(Join-Path $manifestRace "AGENTS.md");$manifestBefore=Text(Join-Path $manifestRace ".project-flow/manifest.json");$race=Invoke-ApplyRace $manifestRace manifest;Assert $race.Changed "manifest race hook did not run";Assert($race.ExitCode-eq1)"manifest race apply exit";Assert((Text(Join-Path $manifestRace "AGENTS.md"))-ceq$manifestRaceAgents)"manifest race changed managed files";Assert((Text(Join-Path $manifestRace ".project-flow/manifest.json"))-ceq($manifestBefore+[char]10))"manifest race edit not preserved";Assert($race.Error.Contains("Manifest changed after planning"))"manifest race reason missing"
+ # Concurrent WriteAllText can be observed while truncated or at either hash fence.
+ # Assert fail-closed effects, not scheduling-dependent diagnostic wording.
+ $liveRace=New-Fixture "0.8.3" live-race
+ $liveRaceExpected=(Text(Join-Path $liveRace "AGENTS.md"))+"RACE-LIVE"+[char]10
+ $liveRaceBefore=TreeHashes $liveRace
+ $race=Invoke-ApplyRace $liveRace live
+ Assert $race.Changed "live race hook did not run"
+ Assert($race.ExitCode-eq1)"live race apply exit"
+ Assert((Text(Join-Path $liveRace "AGENTS.md"))-ceq$liveRaceExpected)"live race content was overwritten"
+ $liveRaceAfter=TreeHashes $liveRace
+ [void]$liveRaceBefore.Remove("AGENTS.md");[void]$liveRaceAfter.Remove("AGENTS.md")
+ Assert(SameMap $liveRaceBefore $liveRaceAfter)"live race changed other project bytes"
+ Assert(-not[string]::IsNullOrWhiteSpace($race.Error))"live race failure had no diagnostic"
+ Assert(-not$race.Output.Contains("APPLIED "))"live race reported successful apply"
+ $manifestRace=New-Fixture "0.8.3" manifest-race
+ $manifestBefore=Text(Join-Path $manifestRace ".project-flow/manifest.json")
+ $manifestRaceBefore=TreeHashes $manifestRace
+ $race=Invoke-ApplyRace $manifestRace manifest
+ Assert $race.Changed "manifest race hook did not run"
+ Assert($race.ExitCode-eq1)"manifest race apply exit"
+ Assert((Text(Join-Path $manifestRace ".project-flow/manifest.json"))-ceq($manifestBefore+[char]10))"manifest race edit not preserved"
+ $manifestRaceAfter=TreeHashes $manifestRace
+ [void]$manifestRaceBefore.Remove(".project-flow/manifest.json");[void]$manifestRaceAfter.Remove(".project-flow/manifest.json")
+ Assert(SameMap $manifestRaceBefore $manifestRaceAfter)"manifest race changed other project bytes"
+ Assert(-not[string]::IsNullOrWhiteSpace($race.Error))"manifest race failure had no diagnostic"
+ Assert(-not$race.Output.Contains("APPLIED "))"manifest race reported successful apply"
  $backupRace=New-Fixture "0.8.3" backup-race;$backupAgents=Join-Path $backupRace "AGENTS.md";WriteUtf8 $backupAgents ((Text $backupAgents)+("X"*8388608)+[char]10);$backupBefore=TreeHashes $backupRace;$race=Invoke-BackupRace $backupRace;Assert $race.Changed "backup race hook did not run";Assert($race.ExitCode-eq5)"backup race apply exit";Assert((Text $backupAgents).Contains("RACE-AFTER-BACKUP"))"backup race external edit was lost";$backupAfter=TreeHashes $backupRace;[void]$backupBefore.Remove("AGENTS.md");[void]$backupAfter.Remove("AGENTS.md");Assert(SameMap $backupBefore $backupAfter)"backup race polluted other project files";$transactionRoot=Join-Path $backupRace ".project-flow/transactions";Assert(@(Get-ChildItem -LiteralPath $transactionRoot -Directory -ErrorAction SilentlyContinue).Count-eq0)"backup race left transaction";$stagingRoot=Join-Path $backupRace ".project-flow/staging";Assert(@(Get-ChildItem -LiteralPath $stagingRoot -Directory -ErrorAction SilentlyContinue).Count-eq0)"backup race left staging";Assert($race.Error.Contains("Managed target changed") -and $race.Error.Contains("AGENTS.md"))("backup race reason missing: "+$race.Error)
  $concurrent=New-Fixture "0.8.3" concurrent;$concurrentAgents=Join-Path $concurrent "AGENTS.md";WriteUtf8 $concurrentAgents ((Text $concurrentAgents)+("C"*16777216)+[char]10);$first=Start-ApplyProcess $concurrent;$second=Start-ApplyProcess $concurrent;$first.WaitForExit();$second.WaitForExit();$firstOutput=$first.StandardOutput.ReadToEnd()+$first.StandardError.ReadToEnd();$secondOutput=$second.StandardOutput.ReadToEnd()+$second.StandardError.ReadToEnd();$codes=@($first.ExitCode,$second.ExitCode)|Sort-Object;Assert(($codes-join",")-ceq"0,1")("concurrent apply exit codes: "+($codes-join",")+"`n"+$firstOutput+"`n"+$secondOutput);Assert(($firstOutput+$secondOutput).Contains("transaction lock"))"concurrent apply did not report lock contention";& $engine validate -Target $concurrent;$ok=$?;Assert $ok "concurrent apply final validation"
  $corrupt=New-Fixture "0.8.3" corrupt-backup;& $engine apply -Target $corrupt;$ok=$?;Assert $ok "corrupt fixture apply";$corruptManifest=Get-Content -Raw -Encoding UTF8 (Join-Path $corrupt ".project-flow/manifest.json")|ConvertFrom-Json;$corruptTxn=[string]$corruptManifest.last_transaction;$corruptBefore=TreeHashes $corrupt;$lateBackup=Join-Path $corrupt ".project-flow/transactions/$corruptTxn/backup/.agents/WORKFLOW_PROTOCOL.md";Assert(Test-Path $lateBackup -PathType Leaf)"late rollback backup missing";WriteUtf8 $lateBackup "CORRUPTED-BACKUP";& $engine rollback -Target $corrupt -Rollback $corruptTxn 2>$null;$ok=$?;Assert(-not$ok)"rollback accepted corrupt late backup";$corruptAfter=TreeHashes $corrupt;Assert(SameMap $corruptBefore $corruptAfter)"corrupt late backup caused partial restore";$corruptManifestAfter=Get-Content -Raw -Encoding UTF8 (Join-Path $corrupt ".project-flow/manifest.json")|ConvertFrom-Json;Assert($corruptManifestAfter.workflow_version-ceq$currentVersion)"corrupt rollback changed manifest"
@@ -149,21 +186,28 @@ try{
  Assert(([regex]::Matches($plan,"(?m)^DELETE\s+")).Count-eq0)"supported upgrade unexpectedly deletes files"
  & $engine apply -Target $upgrade;$ok=$?;Assert $ok "apply"
  $am=Get-Content -Raw -Encoding UTF8 (Join-Path $upgrade .project-flow/manifest.json)|ConvertFrom-Json
- Assert($am.workflow_version-ceq$currentVersion)"upgrade version";Assert(@($am.files).Count-eq6)"upgrade count"
+ Assert($am.workflow_version-ceq$currentVersion)"upgrade version";Assert(@($am.files).Count-eq8)"upgrade count"
  $txn=[string]$am.last_transaction;$meta=Get-Content -Raw -Encoding UTF8 (Join-Path $upgrade ".project-flow/transactions/$txn/transaction.json")|ConvertFrom-Json
  Assert(@($meta.removed_files).Count-eq0)"supported upgrade recorded retired files";Assert(@($meta.files|Where-Object resolution -eq DELETE).Count-eq0)"supported upgrade recorded delete actions"
  & $engine validate -Target $upgrade;$ok=$?;Assert $ok "upgraded validation"
  & $engine rollback -Target $upgrade -Rollback $txn;$ok=$?;Assert $ok "rollback"
  $restored=TreeHashes $upgrade;Assert(SameMap $before $restored)"rollback tree mismatch"
  & $engine rollback -Target $upgrade -Rollback $txn;$ok=$?;Assert $ok "idempotent rollback";$restoredAgain=TreeHashes $upgrade;Assert(SameMap $restored $restoredAgain)"idempotent rollback changed tree"
-foreach($patchVersion in @("0.9.0","0.9.1","0.10.0","0.11.0")){
- $patchFixture=New-Fixture $patchVersion ("patch-upgrade-"+$patchVersion.Replace(".","-"));$patchBefore=TreeHashes $patchFixture
+foreach($patchVersion in @("0.8.3","0.9.0","0.9.1","0.10.0","0.11.0","0.12.0","0.13.0")){
+ $patchFixture=New-Fixture $patchVersion ("patch-upgrade-"+$patchVersion.Replace(".","-"))
+ WriteUtf8 (Join-Path $patchFixture "docs/PROJECT_PLAN.md") "# Custom plan`n`n## 目标`n`n保留计划。`n`n## 总体进度`n`n0%`n`n## 任务步骤`n`n- [ ] S01 | 保留`n"
+ WriteUtf8 (Join-Path $patchFixture "docs/PROJECT_STATE.md") "# Custom state`n`n## 当前目标`n`n保留状态。`n"
+ $patchBefore=TreeHashes $patchFixture
  $patchPlan=& $engine plan -Target $patchFixture *>&1|Out-String
  Assert($patchPlan.Contains("UPGRADE $patchVersion -> $currentVersion"))"$patchVersion patch target"
+ Assert($patchPlan-match'(?m)^PRESERVE\s+seed_once\s+docs/PROJECT_PLAN\.md\s*$')"$patchVersion project plan was not preserved"
+ Assert($patchPlan-match'(?m)^PRESERVE\s+seed_once\s+docs/PROJECT_STATE\.md\s*$')"$patchVersion project state was not preserved"
  Assert(([regex]::Matches($patchPlan,"(?m)^DELETE\s+")).Count-eq0)"$patchVersion patch unexpectedly retires files"
  & $engine apply -Target $patchFixture;$ok=$?;Assert $ok "$patchVersion patch apply"
  $patchManifest=Get-Content -Raw -Encoding UTF8 (Join-Path $patchFixture ".project-flow/manifest.json")|ConvertFrom-Json
  Assert($patchManifest.workflow_version-ceq$currentVersion)"$patchVersion patch version"
+ Assert((Text (Join-Path $patchFixture "docs/PROJECT_PLAN.md")).StartsWith("# Custom plan`n"))"$patchVersion project plan changed"
+ Assert((Text (Join-Path $patchFixture "docs/PROJECT_STATE.md")).StartsWith("# Custom state`n"))"$patchVersion project state changed"
  & $engine validate -Target $patchFixture;$ok=$?;Assert $ok "$patchVersion patch validate"
  & $engine rollback -Target $patchFixture -Rollback ([string]$patchManifest.last_transaction);$ok=$?;Assert $ok "$patchVersion patch rollback"
  Assert(SameMap $patchBefore (TreeHashes $patchFixture))"$patchVersion patch rollback tree mismatch"
@@ -178,9 +222,54 @@ foreach($patchVersion in @("0.9.0","0.9.1","0.10.0","0.11.0")){
  & (Join-Path $repo scripts/upgrade.ps1) -Target $smoke -Plan;$ok=$?;Assert $ok "upgrade wrapper smoke"
  $dry=Join-Path $temp wrapper-install;[IO.Directory]::CreateDirectory($dry)|Out-Null;& (Join-Path $repo scripts/install.ps1) -Target $dry -ProjectName Wrapper -DryRun;$ok=$?;Assert $ok "install wrapper smoke"
  Assert(-not(Test-Path(Join-Path $dry ".project-flow/transaction.lock")))"dry-run created transaction lock"
-$contract=Text (Join-Path $repo .agents/workflow.json);foreach($needle in @('"schema_version": 11','"max_active": 5','"request_key": "[codex-project-flow:request:v1] projectId=<exactProjectId>; hubThreadId=<exactHubThreadId>; requestId=<exactRequestId>; generation=1"','"request_id_assignment": "hub_before_first_work_output"','"states": ["awaiting_authorization", "queued", "active", "awaiting_acceptance", "revision_pending", "accepted_archived"]','"confirmation_fields": ["understanding", "execution_items"]','"completion_fields": ["changes", "verification", "uncovered", "risk"]','"initial_owner": "hub"','"handoff_boundary": "exact_or_queued_execution_task_identity_established"','"post_handoff_owner": "execution_task"','"hub_post_handoff": "no_participation_for_same_request"','"acceptance_owner": "execution_task"','"acceptance_archive": "exact_self_archive_success_and_matching_archived_task_id_required"','"rejection_route": "execution_task_reconfirm_in_place"','"scope_change_route": "execution_task_reconfirm_in_place"','"awaiting_acceptance_occupies_slot": true','"supplemental_authorization": "continue_original_task"','"different_goal": "parallel_when_disjoint_and_slot_available_else_queue"','"scope_change": "pause_for_execution_task_confirmation_then_continue_original_task"','"replacement": "explicit_user_authorization"','"serial": ["same_request", "overlapping_paths", "upgrade_file_transaction"]','"default_extension": ".md"','"standalone_cover": false','"first_heading": "#"','"heading_progression": "no_skipped_levels"','"validation_scope": "created_or_updated_delivery_documents"','"required": true','"scope": "all_new_or_modified_non_deployment_markdown_documents"','"states": ["draft_pending_review", "approved_for_write", "revision_required", "written"]','"approval_evidence": "explicit_user_chat_approval_bound_to_exact_path_and_content_sha256"','"write_authorization": "approved_exact_content_only"','"bootstrap_managed_markdown": "no_draft_review_for_install_or_recovery"','"upgrade_managed_markdown": "no_draft_review_for_apply_resume_or_rollback"','"non_deployment_markdown": "normal_review_required"','"rotation"','"mode": "explicit_user_authorization_only"','"protocol": 4','"post_handoff_owner": "transaction_task"','"barrier_owner": "transaction_task"','"request_key": "[codex-project-flow:upgrade-request:v1] projectId=<exactProjectId>; hubThreadId=<exactHubThreadId>; requestId=<exactRequestId>; mode=<exactMode>; sourceVersion=<exactSourceVersion>; targetVersion=<exactTargetVersion>"','"active_snapshot": "empty_required_before_file_transaction_fail_closed"','"creation_gate": "hub_exhaustive_check_blocks_on_provisional_and_active_before_every_creation"','"coordinator_claim": "[codex-project-flow:upgrade-claim:v2] projectId=<exactProjectId>; requestId=<exactRequestId>; coordinatorThreadId=<exactCoordinatorThreadId>; targetVersion=<exactTargetVersion>; claimId=<exactClaimId>"')){Assert ($contract.Contains($needle)) "missing $needle"}
+$contract=Text (Join-Path $repo .agents/workflow.json)
+foreach($needle in @(
+ '"schema_version": 13',
+ '"project_plan": "docs/PROJECT_PLAN.md"',
+ '"project_memory": ".agents/skills/project-workflow-manager/scripts/project-memory.py"',
+ '"max_active": 5',
+ '"request_key": "[codex-project-flow:request:v1] projectId=<exactProjectId>; hubThreadId=<exactHubThreadId>; requestId=<exactRequestId>; generation=1"',
+ '"request_id_assignment": "hub_before_first_work_output"',
+ '"states": ["awaiting_authorization", "queued", "active", "awaiting_acceptance", "revision_pending", "accepted_archived", "paused_archived", "continued_archived"]',
+ '"confirmation_fields": ["understanding", "execution_items"]',
+ '"completion_fields": ["changes", "verification", "uncovered", "risk"]',
+ '"initial_owner": "hub"',
+ '"handoff_boundary": "exact_or_queued_execution_task_identity_established"',
+ '"post_handoff_owner": "execution_task"',
+ '"hub_post_handoff": "no_participation_for_same_request"',
+ '"execution_task_binding": "one_current_visible_task_per_request_with_authorized_successor"',
+ '"acceptance_owner": "execution_task"',
+ '"acceptance_archive": "sync_explicitly_mapped_step_or_state_only_then_exact_self_archive_without_next_step"',
+ '"rejection_route": "execution_task_reconfirm_in_place"',
+ '"scope_change_route": "execution_task_reconfirm_in_place"',
+ '"awaiting_acceptance_occupies_slot": true',
+ '"supplemental_authorization": "continue_original_task"',
+ '"different_goal": "parallel_when_disjoint_and_slot_available_else_queue"',
+ '"scope_change": "pause_for_execution_task_confirmation_then_continue_original_task"',
+ '"replacement": "explicit_user_authorization"',
+ '"serial": ["same_request", "overlapping_paths", "upgrade_file_transaction"]',
+ '"default_extension": ".md"',
+ '"standalone_cover": false',
+ '"first_heading": "#"',
+ '"heading_progression": "no_skipped_levels"',
+ '"validation_scope": "created_or_updated_delivery_documents"',
+ '"startup_read": ["project_plan", "project_state"]',
+ '"step_completion": "explicit_user_acceptance_only"',
+ '"role": "separate_user_visible_planning_chat"',
+ '"creation": "durable_intent_then_one_create_and_bind_exact_or_queued_identity"',
+ '"mode": "manual_natural_language_continue_or_pause"',
+ '"context_threshold": null',
+ '"continue": "save_then_create_gated_successor_then_archive_predecessor"',
+ '"protocol": 4',
+ '"post_handoff_owner": "transaction_task"',
+ '"barrier_owner": "transaction_task"',
+ '"request_key": "[codex-project-flow:upgrade-request:v1] projectId=<exactProjectId>; hubThreadId=<exactHubThreadId>; requestId=<exactRequestId>; mode=<exactMode>; sourceVersion=<exactSourceVersion>; targetVersion=<exactTargetVersion>"',
+ '"active_snapshot": "empty_required_before_file_transaction_fail_closed"',
+ '"creation_gate": "hub_exhaustive_check_blocks_on_provisional_and_active_before_every_creation"',
+ '"coordinator_claim": "[codex-project-flow:upgrade-claim:v2] projectId=<exactProjectId>; requestId=<exactRequestId>; coordinatorThreadId=<exactCoordinatorThreadId>; targetVersion=<exactTargetVersion>; claimId=<exactClaimId>"'
+)){Assert ($contract.Contains($needle)) "missing $needle"}
 foreach($retiredNeedle in @('"hub_handshake"','"hub_followups"','"successor_key"','"task_handshake"','"successor_creation"','"pair_order"','"successor_followups"','"compensating_successors"')){Assert(-not$contract.Contains($retiredNeedle)) "retired post-handoff contract remains: $retiredNeedle"}
-$contractValue=$contract|ConvertFrom-Json;Assert($contractValue.upgrade.PSObject.Properties.Name-cnotcontains"recovery") "retired upgrade recovery container remains"
+$contractValue=$contract|ConvertFrom-Json;Assert($contractValue.documents.PSObject.Properties.Name-cnotcontains"review") "retired document review contract remains";Assert($contractValue.upgrade.PSObject.Properties.Name-cnotcontains"recovery") "retired upgrade recovery container remains"
 $markdownPath=Join-Path $clean "docs/PROJECT_STATE.md";$markdownOriginal=Text $markdownPath
  WriteUtf8 $markdownPath "## Invalid first heading`n";$validation=& $engine validate -Target $clean -Runtime 2>&1|Out-String;$ok=$?;Assert(-not$ok)"validator accepted non-H1 first heading";Assert($validation.Contains("first heading"))"first heading rejection reason missing"
  WriteUtf8 $markdownPath "# Valid first heading`n`n### Skipped level`n";$validation=& $engine validate -Target $clean -Runtime 2>&1|Out-String;$ok=$?;Assert(-not$ok)"validator accepted skipped Markdown heading";Assert($validation.Contains("heading levels"))"heading progression rejection reason missing"
@@ -188,5 +277,11 @@ $markdownPath=Join-Path $clean "docs/PROJECT_STATE.md";$markdownOriginal=Text $m
  & (Join-Path $repo "tests/test-bootstrap-interaction.ps1");$ok=$?;Assert $ok "bootstrap interaction contract"
  & (Join-Path $repo "tests/test-bootstrap-engine.ps1");$ok=$?;Assert $ok "bootstrap PowerShell engine contract"
  & (Join-Path $repo "tests/test-request-execution.ps1");$ok=$?;Assert $ok "request execution contract"
+ $memoryPython=Get-Command python3 -ErrorAction SilentlyContinue
+ if($null-eq$memoryPython){$memoryPython=Get-Command python -ErrorAction SilentlyContinue}
+ Assert ($null-ne$memoryPython) "Python 3 is required for project-memory and model-policy tests"
+ & $memoryPython.Source (Join-Path $repo "tests/test-project-memory.py");Assert ($LASTEXITCODE-eq0) "project-memory regression"
+ & $memoryPython.Source (Join-Path $repo "tests/test-model-defaults.py");Assert ($LASTEXITCODE-eq0) "model defaults contract"
+ & $memoryPython.Source (Join-Path $repo "tests/test-upgrade-hub-refresh.py");Assert ($LASTEXITCODE-eq0) "upgrade hub refresh integration"
  Write-Host "All PowerShell regression tests passed."
 }finally{if(Test-Path $temp){Remove-Item -LiteralPath $temp -Recurse -Force}}

@@ -248,8 +248,7 @@ $ambiguousClaim = Invoke-MockBootstrap @{ registry="missing"; installed=$true; l
 Assert ($ambiguousClaim.stopped -and $ambiguousClaim.lock_inspect -eq 1 -and $ambiguousClaim.lock_recover -eq 0 -and $ambiguousClaim.create -eq 0) "ambiguous stale claim was recovered or replaced"
 
 # Machine policy is the production contract consumed by the Skill.
-Assert ($workflow.schema_version -eq 11) "bootstrap interaction model requires workflow schema 11"
-Assert ($workflow.documents.review.exceptions.bootstrap_managed_markdown -ceq "no_draft_review_for_install_or_recovery") "bootstrap managed Markdown deployment exception mismatch"
+Assert ($workflow.schema_version -eq 13) "bootstrap interaction model requires workflow schema 13"
 Assert ($workflow.bootstrap.fast_path -eq "registry_targeted_read") "fast-path policy mismatch"
 Assert ($workflow.bootstrap.recovery_path -eq "exhaustive_metadata_on_exception") "recovery policy mismatch"
 Assert ($workflow.bootstrap.unarchive -eq "only_when_explicitly_archived") "unarchive policy mismatch"
@@ -258,5 +257,8 @@ Assert ($workflow.bootstrap.lock_acquire -eq "atomic_create_new") "lock acquire 
 Assert ($workflow.bootstrap.lock_inspect -eq "validated_read_only") "lock inspect policy mismatch"
 Assert ($workflow.bootstrap.existing_lock -eq "inspect_then_recover_or_stop") "existing lock routing policy mismatch"
 Assert ($workflow.bootstrap.stale_recovery -eq "exact_token_cas_same_thread_or_install_orphan") "stale recovery policy mismatch"
+Assert ($workflow.planning.automatic_on_bootstrap -eq $true) "bootstrap must create the planning chat automatically"
+Assert ($workflow.planning.creation -eq "durable_intent_then_one_create_and_bind_exact_or_queued_identity") "planning-chat creation policy mismatch"
+Assert ($workflow.planning.unknown_creation -eq "recover_original_identity_never_recreate") "planning-chat recovery policy mismatch"
 
 Write-Host "All bootstrap interaction contract tests passed."

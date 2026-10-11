@@ -4,15 +4,8 @@ param()
 $ErrorActionPreference = "Stop"
 $repo = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 $workflow = Get-Content -Raw -Encoding UTF8 (Join-Path $repo ".agents/workflow.json") | ConvertFrom-Json
-$utf8 = [Text.UTF8Encoding]::new($false)
-$temp = Join-Path ([IO.Path]::GetTempPath()) ("codex-project-flow-request-test-" + [guid]::NewGuid().ToString("N"))
 
 function Assert([bool]$Condition, [string]$Message) { if (-not $Condition) { throw $Message } }
-function Get-ContentSha256([string]$Content) {
-    $sha = [Security.Cryptography.SHA256]::Create()
-    try { "sha256:" + ([BitConverter]::ToString($sha.ComputeHash($utf8.GetBytes($Content))).Replace("-", "").ToLowerInvariant()) }
-    finally { $sha.Dispose() }
-}
 function New-Model {
     [ordered]@{
         Requests=@{}; Active=$null; UpgradeBarrierState=$null; UpgradeBarrierScanComplete=$true
@@ -20,7 +13,13 @@ function New-Model {
         Archived=[Collections.Generic.List[string]]::new()
         HubActions=[Collections.Generic.List[string]]::new()
         ExecutionActions=[Collections.Generic.List[string]]::new()
-        Documents=@{}
+        AcceptedSteps=[Collections.Generic.List[string]]::new()
+        AcceptanceMemory=@{}
+        AcceptanceArchiveAttempts=0
+        RotationIntents=@{}
+        NativeCreateAttempts=0
+        NativeArchiveAttempts=0
+        StateOnlySyncs=0
         FileTransactions=0
     }
 }
@@ -71,36 +70,82 @@ function Complete-Round($Model,[string]$RequestId,[System.Collections.IDictionar
     if((@($Completion.Keys)-join",")-cne((@($workflow.requests.completion_fields))-join",")){return $false}
     $Model.Active.Completion=$Completion;$Model.Active.State="awaiting_acceptance";$Model.ExecutionActions.Add("$($Model.Active.ThreadId):completion");$true
 }
-function Self-ArchiveAccepted($Model,[string]$RequestId,$ArchiveResult) {
+function Self-ArchiveAccepted(
+    $Model,[string]$RequestId,$ArchiveResult,[string]$MappedStep="",[string]$AcceptanceText="",
+    [bool]$HumanAccepted=$true,[ValidateSet("success","failure")][string]$MemoryOutcome="success"
+) {
     if($null-eq$Model.Active-or$Model.Active.RequestId-cne$RequestId-or$Model.Active.State-cne"awaiting_acceptance"){return $false}
     $threadId=$Model.Active.ThreadId
+    $memory=$Model.AcceptanceMemory[$RequestId]
+    $mode=if([string]::IsNullOrWhiteSpace($MappedStep)){"state_only"}else{"mapped_step"}
+    if($null-eq$memory){
+        if(-not$HumanAccepted){return $false}
+        if($MemoryOutcome-cne"success"){$Model.ExecutionActions.Add("$threadId`:acceptance-memory-failed");return $false}
+        if($mode-ceq"state_only"){$Model.StateOnlySyncs=[int]$Model.StateOnlySyncs+1;$Model.ExecutionActions.Add("$threadId`:sync-state-only")}else{$Model.AcceptedSteps.Add($MappedStep);$Model.ExecutionActions.Add("$threadId`:sync-explicit-step:$MappedStep")}
+        $memory=[ordered]@{ThreadId=$threadId;Mode=$mode;MappedStep=$MappedStep;State="synced"};$Model.AcceptanceMemory[$RequestId]=$memory
+    } elseif($memory.ThreadId-cne$threadId-or$memory.Mode-cne$mode-or$memory.MappedStep-cne$MappedStep) {
+        return $false
+    }
+    $Model.AcceptanceArchiveAttempts=[int]$Model.AcceptanceArchiveAttempts+1
     if($null-eq$ArchiveResult-or$ArchiveResult.success-ne$true-or[string]$ArchiveResult.archivedTaskId-cne$threadId){return $false}
     $Model.Archived.Add($threadId);$Model.Active.State="accepted_archived";$Model.ExecutionActions.Add("$threadId`:self-archived");$Model.Active=$null;$true
 }
-function Submit-DocumentDraft($Model,[string]$RequestId,[string]$Path,[string]$Content) {
-    if($null-eq$Model.Active-or$Model.Active.RequestId-cne$RequestId-or[IO.Path]::GetExtension($Path)-cne".md"){return $null}
-    $record=[ordered]@{Path=$Path;Content=$Content;ContentSha256=(Get-ContentSha256 $Content);State="draft_pending_review";History=@("draft_pending_review");ApprovedPath=$null;ApprovedSha256=$null}
-    $Model.Documents[$Path]=$record;$Model.ExecutionActions.Add("$($Model.Active.ThreadId):document-draft:$Path");$record
+function Request-AmbiguousArchive($Model,[string]$RequestId) {
+    if($null-eq$Model.Active-or$Model.Active.RequestId-cne$RequestId){return $false}
+    $threadId=$Model.Active.ThreadId;$Model.ExecutionActions.Add("$threadId`:save-memory");$Model.ExecutionActions.Add("$threadId`:ask-continue-or-pause");$true
 }
-function Approve-DocumentDraft($Model,[string]$Path,[string]$ContentSha256,[bool]$ExplicitUserApproval) {
-    if(-not$ExplicitUserApproval-or-not$Model.Documents.ContainsKey($Path)){return $false}
-    $record=$Model.Documents[$Path]
-    if($record.State-cne"draft_pending_review"-or$record.Path-cne$Path-or$record.ContentSha256-cne$ContentSha256){return $false}
-    $record.State="approved_for_write";$record.History=@($record.History)+"approved_for_write";$record.ApprovedPath=$Path;$record.ApprovedSha256=$ContentSha256;$true
+function Complete-ContinuationArchive($Model,$Intent,[ValidateSet("success","failure","unknown")][string]$ArchiveOutcome) {
+    if($Intent.State-cne"created_gated"-or$null-eq$Model.Active-or$Model.Active.ThreadId-cne$Intent.PredecessorThreadId){return $false}
+    $Model.NativeArchiveAttempts=[int]$Model.NativeArchiveAttempts+1
+    if($ArchiveOutcome-cne"success"){
+        $Model.ExecutionActions.Add("$($Intent.PredecessorThreadId)`:archive-$ArchiveOutcome")
+        return $false
+    }
+    $Model.Archived.Add($Intent.PredecessorThreadId);$Model.ExecutionActions.Add("$($Intent.PredecessorThreadId)`:continued-archived")
+    $Model.Active.Generation=$Intent.NextGeneration;$Model.Active.ThreadId=$Intent.SuccessorThreadId;$Model.Active.State="active"
+    $Intent.State="activated";$Model.ExecutionActions.Add("$($Intent.SuccessorThreadId)`:predecessor-archive-matched");$true
 }
-function Reject-And-ReviseDocument($Model,[string]$Path,[string]$RevisedContent) {
-    if(-not$Model.Documents.ContainsKey($Path)){return $null};$record=$Model.Documents[$Path]
-    $record.State="revision_required";$record.History=@($record.History)+"revision_required";$record.Content=$RevisedContent;$record.ContentSha256=Get-ContentSha256 $RevisedContent
-    $record.ApprovedPath=$null;$record.ApprovedSha256=$null;$record.State="draft_pending_review";$record.History=@($record.History)+"draft_pending_review"
-    $Model.ExecutionActions.Add("$($Model.Active.ThreadId):document-revised:$Path");$record
+function Continue-ExecutionTask(
+    $Model,[string]$RequestId,[bool]$Authorized,[int]$OccupiedSlots=1,
+    [ValidateSet("created_gated","unknown")][string]$CreateOutcome="created_gated",
+    [ValidateSet("success","failure","unknown")][string]$ArchiveOutcome="success"
+) {
+    if(-not$Authorized-or$null-eq$Model.Active-or$Model.Active.RequestId-cne$RequestId-or$Model.Active.State-cne"active"){return $false}
+    $intent=$Model.RotationIntents[$RequestId]
+    if($null-eq$intent){
+        if($OccupiedSlots-ge[int]$workflow.tasks.max_active){return $false}
+        $predecessor=$Model.Active.ThreadId;$nextGeneration=[int]$Model.Active.Generation+1;$successor="task-$RequestId-g$nextGeneration"
+        $Model.ExecutionActions.Add("$predecessor`:save-memory")
+        $intent=[ordered]@{RequestId=$RequestId;PredecessorThreadId=$predecessor;SuccessorThreadId=$successor;NextGeneration=$nextGeneration;State="intent_persisted"}
+        $Model.RotationIntents[$RequestId]=$intent;$Model.ExecutionActions.Add("$predecessor`:continuation-intent-persisted:$successor")
+        $Model.NativeCreateAttempts=[int]$Model.NativeCreateAttempts+1
+        if($CreateOutcome-ceq"unknown"){
+            $intent.State="creation_unknown";$Model.ExecutionActions.Add("$successor`:creation-unknown");return $false
+        }
+        $Model.Created.Add($successor);$intent.State="created_gated";$Model.ExecutionActions.Add("$successor`:created-gated")
+    } elseif($intent.PredecessorThreadId-cne$Model.Active.ThreadId) {
+        return $false
+    } elseif($intent.State-ceq"creation_unknown") {
+        $Model.ExecutionActions.Add("$($intent.SuccessorThreadId)`:creation-unknown-await-recovery");return $false
+    } elseif($intent.State-cne"created_gated") {
+        return $false
+    }
+    Complete-ContinuationArchive $Model $intent $ArchiveOutcome
 }
-function Write-ApprovedDocument($Model,[string]$Path,[string]$ContentSha256,[string]$Root) {
-    if(-not$Model.Documents.ContainsKey($Path)){return $false};$record=$Model.Documents[$Path]
-    if($record.State-cne"approved_for_write"-or$record.ApprovedPath-cne$Path-or$record.ApprovedSha256-cne$ContentSha256-or$record.ContentSha256-cne$ContentSha256){return $false}
-    $target=Join-Path $Root $Path;$directory=Split-Path -Parent $target
-    if(-not(Test-Path -LiteralPath $directory)){[IO.Directory]::CreateDirectory($directory)|Out-Null}
-    [IO.File]::WriteAllText($target,$record.Content,$utf8);$record.State="written";$record.History=@($record.History)+"written"
-    $Model.ExecutionActions.Add("$($Model.Active.ThreadId):document-written:$Path");$true
+function Resolve-UnknownSuccessor(
+    $Model,[string]$RequestId,[string]$ExactSuccessorThreadId,
+    [ValidateSet("success","failure","unknown")][string]$ArchiveOutcome="success"
+) {
+    $intent=$Model.RotationIntents[$RequestId]
+    if($null-eq$intent-or$intent.State-cne"creation_unknown"-or$intent.SuccessorThreadId-cne$ExactSuccessorThreadId-or$null-eq$Model.Active-or$Model.Active.ThreadId-cne$intent.PredecessorThreadId){return $false}
+    $Model.Created.Add($intent.SuccessorThreadId);$intent.State="created_gated"
+    $Model.ExecutionActions.Add("$($intent.SuccessorThreadId)`:creation-recovered-exact")
+    Complete-ContinuationArchive $Model $intent $ArchiveOutcome
+}
+function Pause-ExecutionTask($Model,[string]$RequestId,[bool]$Authorized) {
+    if(-not$Authorized-or$null-eq$Model.Active-or$Model.Active.RequestId-cne$RequestId){return $false}
+    $threadId=$Model.Active.ThreadId;$Model.ExecutionActions.Add("$threadId`:save-memory");$Model.Archived.Add($threadId)
+    $Model.Active.State="paused_archived";$Model.ExecutionActions.Add("$threadId`:paused-archived");$Model.Active=$null;$true
 }
 function Start-UpgradeFileTransaction($Model,[object[]]$ActiveSnapshot) {
     if(@($ActiveSnapshot).Count-ne0){$Model.ExecutionActions.Add("$($Model.Active.ThreadId):upgrade-blocked-nonempty-snapshot");return $false}
@@ -112,34 +157,32 @@ function Test-ExecutionCapacity([string[]]$States,[string[]]$ExistingPaths,[stri
     $overlap=@($RequestedPaths|Where-Object{$ExistingPaths-ccontains$_}).Count-gt0
     ($occupied -lt [int]$workflow.tasks.max_active) -and -not $overlap
 }
-function Test-ManagedMarkdownDeploymentException([string]$Mode,[bool]$ManagedPath) {
-    if(-not$ManagedPath){return $false}
-    if($Mode-ceq"bootstrap"){return $workflow.documents.review.exceptions.bootstrap_managed_markdown-ceq"no_draft_review_for_install_or_recovery"}
-    if($Mode-in@("apply","resume","rollback")){return $workflow.documents.review.exceptions.upgrade_managed_markdown-ceq"no_draft_review_for_apply_resume_or_rollback"}
-    $false
+function Test-SuccessorPathGate([object[]]$ActiveTasks,[string]$ExactPredecessorThreadId,[string[]]$RequestedPaths) {
+    if(@($ActiveTasks).Count -ge [int]$workflow.tasks.max_active){return $false}
+    $conflicting=@($ActiveTasks | Where-Object {
+        [string]$_.threadId -cne $ExactPredecessorThreadId -and @($_.paths | Where-Object { $RequestedPaths -ccontains $_ }).Count -gt 0
+    })
+    $conflicting.Count -eq 0
 }
-
-try {
-    [IO.Directory]::CreateDirectory($temp)|Out-Null
-    Assert($workflow.schema_version-eq11) "request model requires schema 11"
+    Assert($workflow.schema_version-eq13) "request model requires schema 13"
     Assert($workflow.tasks.max_active-eq5) "visible execution limit must be five"
     Assert($workflow.requests.initial_owner-ceq"hub") "hub must own only the initial phase"
     Assert($workflow.requests.handoff_boundary-ceq"exact_or_queued_execution_task_identity_established") "handoff boundary mismatch"
     Assert($workflow.requests.post_handoff_owner-ceq"execution_task") "execution task must own post-handoff lifecycle"
     Assert($workflow.requests.hub_post_handoff-ceq"no_participation_for_same_request") "hub post-handoff participation must be forbidden"
     Assert($workflow.requests.acceptance_owner-ceq"execution_task") "execution task must own acceptance"
-    Assert($workflow.requests.acceptance_archive-ceq"exact_self_archive_success_and_matching_archived_task_id_required") "self-archive contract mismatch"
+    Assert($workflow.requests.execution_task_binding-ceq"one_current_visible_task_per_request_with_authorized_successor") "request successor binding mismatch"
+    Assert($workflow.requests.acceptance_archive-ceq"sync_explicitly_mapped_step_or_state_only_then_exact_self_archive_without_next_step") "self-archive contract mismatch"
     Assert($workflow.requests.rejection_route-ceq"execution_task_reconfirm_in_place") "rejection route mismatch"
     Assert($workflow.requests.scope_change_route-ceq"execution_task_reconfirm_in_place") "scope-change route mismatch"
-    Assert($workflow.documents.review.required) "document review must be required"
-    Assert((@($workflow.documents.review.states)-join",")-ceq"draft_pending_review,approved_for_write,revision_required,written") "document review states mismatch"
+    Assert($workflow.documents.PSObject.Properties.Name-cnotcontains"review") "retired document review contract remains"
+    Assert($workflow.rotation.mode-ceq"manual_natural_language_continue_or_pause") "manual continuation policy mismatch"
+    Assert($null-eq$workflow.rotation.context_threshold) "rotation must not use an automatic context threshold"
+    Assert($workflow.rotation.successor_gate-ceq"wait_for_matching_predecessor_archive_before_work") "successor gate mismatch"
+    Assert($workflow.rotation.capacity-ceq"reserve_one_slot_before_create_never_exceed_max_active") "successor capacity rule mismatch"
     Assert(Test-ExecutionCapacity @("active","blocked","waiting","queued") @("src/a.cpp") @("src/b.cpp")) "four occupied slots did not permit an independent fifth request"
     Assert(-not(Test-ExecutionCapacity @("active","blocked","waiting","queued","awaiting_acceptance") @("src/a.cpp") @("src/b.cpp"))) "sixth request bypassed the five-slot limit"
     Assert(-not(Test-ExecutionCapacity @("active") @("src/shared.cpp") @("src/shared.cpp"))) "overlapping paths were allowed to run concurrently"
-    Assert(Test-ManagedMarkdownDeploymentException "bootstrap" $true) "bootstrap managed Markdown exception is missing"
-    foreach($mode in @("apply","resume","rollback")){Assert(Test-ManagedMarkdownDeploymentException $mode $true) "$mode managed Markdown exception is missing"}
-    Assert(-not(Test-ManagedMarkdownDeploymentException "apply" $false)) "deployment exception covered non-managed Markdown"
-    Assert(-not(Test-ManagedMarkdownDeploymentException "plan" $true)) "read-only plan incorrectly received a Markdown write exception"
     $barrierModel=New-Model;[void](New-HubRequest $barrierModel "B1" "independent" @("inspect"));$barrierModel.UpgradeBarrierScanComplete=$false
     Assert(($null -eq (Confirm-HubRequest $barrierModel "B1")) -and $barrierModel.Created.Count -eq 0) "incomplete barrier scan allowed a new execution task"
     $barrierModel.UpgradeBarrierScanComplete=$true;$barrierModel.UpgradeBarrierState="provisional"
@@ -164,27 +207,6 @@ try {
     Assert(Confirm-InPlace $model "R1") "scope change confirmation failed"
     Assert($model.Created.Count-eq1-and$model.HubActions.Count-eq$hubActionsAfterHandoff) "scope change created another task or returned to hub"
 
-    $documentPath="docs/output.md";$draft=Submit-DocumentDraft $model "R1" $documentPath "# Draft one`n";$target=Join-Path $temp $documentPath
-    Assert(-not(Write-ApprovedDocument $model $documentPath $draft.ContentSha256 $temp)) "unapproved Markdown was written"
-    Assert(-not(Test-Path -LiteralPath $target)) "unapproved Markdown target exists"
-    Assert(-not(Approve-DocumentDraft $model "docs/wrong.md" $draft.ContentSha256 $true)) "wrong-path approval was accepted"
-    Assert(-not(Approve-DocumentDraft $model $documentPath (Get-ContentSha256 "wrong") $true)) "wrong-hash approval was accepted"
-    Assert(-not(Approve-DocumentDraft $model $documentPath $draft.ContentSha256 $false)) "non-user approval was accepted"
-    Assert(Approve-DocumentDraft $model $documentPath $draft.ContentSha256 $true) "exact document approval failed"
-    $oldHash=$draft.ContentSha256;$revised=Reject-And-ReviseDocument $model $documentPath "# Draft two`n"
-    Assert($revised.ContentSha256-cne$oldHash-and$revised.State-ceq"draft_pending_review") "revision did not invalidate old approval"
-    Assert(-not(Write-ApprovedDocument $model $documentPath $oldHash $temp)) "old approval authorized revised content"
-    Assert(-not(Test-Path -LiteralPath $target)) "revised unapproved Markdown target exists"
-    Assert(Approve-DocumentDraft $model $documentPath $revised.ContentSha256 $true) "revised draft approval failed"
-    Assert(Write-ApprovedDocument $model $documentPath $revised.ContentSha256 $temp) "approved exact Markdown was not written"
-    Assert((Get-Content -Raw -Encoding UTF8 $target)-ceq"# Draft two`n") "written Markdown differs from approved content"
-    Assert((@($revised.History)-join",")-ceq"draft_pending_review,approved_for_write,revision_required,draft_pending_review,approved_for_write,written") "document did not traverse all four review states"
-    $writtenHash=$revised.ContentSha256;$postWriteRevision=Reject-And-ReviseDocument $model $documentPath "# Draft three`n"
-    Assert($postWriteRevision.State-ceq"draft_pending_review"-and$postWriteRevision.ContentSha256-cne$writtenHash) "post-write change did not return to draft review"
-    Assert(-not(Write-ApprovedDocument $model $documentPath $writtenHash $temp)) "post-write change reused stale approval"
-    Assert((Get-Content -Raw -Encoding UTF8 $target)-ceq"# Draft two`n") "unapproved post-write change modified Markdown"
-    Assert($model.HubActions.Count-eq$hubActionsAfterHandoff-and$model.Created.Count-eq1) "document review involved the hub or created a second task"
-
     $completion=[ordered]@{changes=@("changed");verification=@("passed");uncovered=@("none");risk=@("low")}
     Assert(-not(Complete-Round $model "R1" ([ordered]@{verification=@("passed");changes=@("changed");uncovered=@("none");risk=@("low")}))) "out-of-order completion was accepted"
     Assert(Complete-Round $model "R1" $completion) "valid completion failed"
@@ -194,14 +216,86 @@ try {
     Assert(Complete-Round $model "R1" $completion) "revised completion failed"
     Assert($model.HubActions.Count-eq$hubActionsAfterHandoff) "completion or rejection returned to hub"
 
-    Assert(-not(Self-ArchiveAccepted $model "R1" ([ordered]@{success=$true;archivedTaskId="task-wrong-g1"}))) "wrong self-archive task ID ended request"
-    Assert($model.Active.State-ceq"awaiting_acceptance"-and$model.Archived.Count-eq0) "wrong self-archive result released the slot"
-    Assert(-not(Self-ArchiveAccepted $model "R1" ([ordered]@{success=$false;archivedTaskId=$threadId}))) "failed self-archive ended request"
-    Assert(-not(Self-ArchiveAccepted $model "R1" $null)) "uncertain self-archive ended request"
-    Assert($model.Active.State-ceq"awaiting_acceptance"-and$model.Created.Count-eq1) "failed self-archive changed lifecycle"
-    Assert(Self-ArchiveAccepted $model "R1" ([ordered]@{success=$true;archivedTaskId=$threadId})) "exact self-archive failed"
+    Assert(-not(Self-ArchiveAccepted $model "R1" ([ordered]@{success=$true;archivedTaskId="task-wrong-g1"}) "S01" "接受")) "wrong self-archive task ID ended request"
+    Assert($model.Active.State-ceq"awaiting_acceptance"-and$model.Archived.Count-eq0-and$model.AcceptedSteps.Count-eq1-and$model.AcceptanceArchiveAttempts-eq1) "wrong self-archive did not preserve one completed acceptance-memory sync"
+    Assert(-not(Self-ArchiveAccepted $model "R1" ([ordered]@{success=$true;archivedTaskId=$threadId}) "S02" "接受")) "archive retry changed the explicit mapped step"
+    Assert($model.AcceptedSteps.Count-eq1-and$model.AcceptedSteps[0]-ceq"S01"-and$model.AcceptanceArchiveAttempts-eq1) "mismatched retry repeated memory sync or attempted archive"
+    Assert(-not(Self-ArchiveAccepted $model "R1" ([ordered]@{success=$false;archivedTaskId=$threadId}) "S01" "接受")) "failed self-archive ended request"
+    Assert(-not(Self-ArchiveAccepted $model "R1" $null "S01" "接受")) "uncertain self-archive ended request"
+    Assert($model.Active.State-ceq"awaiting_acceptance"-and$model.Created.Count-eq1-and$model.AcceptedSteps.Count-eq1-and$model.AcceptanceArchiveAttempts-eq3) "failed or unknown self-archive changed lifecycle or repeated memory sync"
+    Assert(Self-ArchiveAccepted $model "R1" ([ordered]@{success=$true;archivedTaskId=$threadId}) "S01" "接受并继续下一步") "exact self-archive failed"
     Assert($model.Requests["R1"].State-ceq"accepted_archived"-and$model.Archived.Count-eq1-and$model.Archived[0]-ceq$threadId) "request did not end on exact self-archive"
+    Assert(($model.ExecutionActions -join ",").Contains("$threadId`:sync-explicit-step:S01,$threadId`:self-archived")) "explicitly mapped step was not synced before self-archive"
+    Assert($model.AcceptedSteps.Count-eq1-and$model.AcceptedSteps[0]-ceq"S01"-and$model.StateOnlySyncs-eq0-and$model.AcceptanceArchiveAttempts-eq4) "acceptance did not use one explicit step sync followed by archive retries"
+    Assert($model.Created.Count-eq1) "acceptance text requesting continuation incorrectly created a next-step task"
     Assert($model.HubActions.Count-eq$hubActionsAfterHandoff) "acceptance or archival involved the hub"
+
+    $rotationModel=New-Model;[void](New-HubRequest $rotationModel "R2" "rotate" @("modify"));$predecessor=Confirm-HubRequest $rotationModel "R2"
+    Assert(Request-AmbiguousArchive $rotationModel "R2") "ambiguous archive did not save and ask"
+    Assert($rotationModel.Archived.Count-eq0-and$rotationModel.Created.Count-eq1-and$rotationModel.Active.ThreadId-ceq$predecessor-and$rotationModel.AcceptedSteps.Count-eq0-and$rotationModel.StateOnlySyncs-eq0) "ambiguous archive created, archived, or accepted work"
+    $predecessorTask=[ordered]@{threadId=$predecessor;state="active";paths=@("src/shared.cpp")}
+    $otherSharedTask=[ordered]@{threadId="task-other-g1";state="active";paths=@("src/shared.cpp")}
+    $otherDisjointTask=[ordered]@{threadId="task-other-g2";state="active";paths=@("src/other.cpp")}
+    Assert(Test-SuccessorPathGate @($predecessorTask) $predecessor @("src/shared.cpp")) "successor path gate did not exclude the exact predecessor"
+    Assert(-not(Test-SuccessorPathGate @($predecessorTask) "task-wrong-g1" @("src/shared.cpp"))) "successor path gate excluded a non-matching predecessor"
+    Assert(-not(Test-SuccessorPathGate @($predecessorTask,$otherSharedTask) $predecessor @("src/shared.cpp"))) "successor path gate ignored another task with the same path"
+    Assert(Test-SuccessorPathGate @($predecessorTask,$otherDisjointTask) $predecessor @("src/shared.cpp")) "disjoint task incorrectly blocked successor creation"
+    Assert(-not(Continue-ExecutionTask $rotationModel "R2" $false 1)) "unauthorized continuation created a successor"
+    Assert(-not(Continue-ExecutionTask $rotationModel "R2" $true 5)) "continuation exceeded the five-slot limit"
+    Assert(Continue-ExecutionTask $rotationModel "R2" $true 4) "authorized continuation failed with one reserved slot"
+    Assert($rotationModel.Active.ThreadId-ceq"task-R2-g2"-and$rotationModel.Active.Generation-eq2) "successor identity or generation mismatch"
+    $rotationEvents=$rotationModel.ExecutionActions -join ","
+    Assert($rotationEvents.Contains("$predecessor`:save-memory,$predecessor`:continuation-intent-persisted:task-R2-g2,task-R2-g2:created-gated,$predecessor`:continued-archived,task-R2-g2:predecessor-archive-matched")) "continuation order, durable intent, or successor gate mismatch"
+    Assert($rotationModel.NativeCreateAttempts-eq1-and$rotationModel.NativeArchiveAttempts-eq1-and$rotationModel.RotationIntents["R2"].State-ceq"activated") "successful continuation did not use one durable create/archive sequence"
+    Assert(Pause-ExecutionTask $rotationModel "R2" $true) "authorized pause failed"
+    Assert($null-eq$rotationModel.Active-and$rotationModel.Created.Count-eq2-and$rotationModel.Archived.Count-eq2-and$rotationModel.AcceptedSteps.Count-eq0-and$rotationModel.StateOnlySyncs-eq0) "pause created a task, accepted work, or retained an active task"
+
+    $archiveFailureModel=New-Model;[void](New-HubRequest $archiveFailureModel "R4" "archive failure" @("modify"));$failurePredecessor=Confirm-HubRequest $archiveFailureModel "R4"
+    Assert(-not(Continue-ExecutionTask $archiveFailureModel "R4" $true 4 "created_gated" "failure")) "failed predecessor archive activated the successor"
+    $failureIntent=$archiveFailureModel.RotationIntents["R4"];$failureSuccessor=$failureIntent.SuccessorThreadId
+    Assert($failureIntent.State-ceq"created_gated"-and$failureIntent.PredecessorThreadId-ceq$failurePredecessor-and$archiveFailureModel.Active.ThreadId-ceq$failurePredecessor) "archive failure did not retain the exact gated continuation intent"
+    Assert($archiveFailureModel.NativeCreateAttempts-eq1-and$archiveFailureModel.NativeArchiveAttempts-eq1-and$archiveFailureModel.Created.Count-eq2-and$archiveFailureModel.Archived.Count-eq0) "archive failure repeated creation, archived, or lost the gated successor"
+    Assert(-not(($archiveFailureModel.ExecutionActions-join",").Contains("$failurePredecessor`:continued-archived"))) "archive failure marked the predecessor continued_archived"
+    Assert(Continue-ExecutionTask $archiveFailureModel "R4" $true 5 "unknown" "success") "archive-failure retry did not recover the exact gated successor"
+    Assert($archiveFailureModel.NativeCreateAttempts-eq1-and$archiveFailureModel.NativeArchiveAttempts-eq2-and$archiveFailureModel.Active.ThreadId-ceq$failureSuccessor-and$archiveFailureModel.Created.Count-eq2) "archive-failure retry repeated creation or activated a different successor"
+    Assert($archiveFailureModel.Archived.Count-eq1-and$archiveFailureModel.Archived[0]-ceq$failurePredecessor-and$failureIntent.State-ceq"activated") "archive-failure retry did not close the exact predecessor intent"
+
+    $archiveUnknownModel=New-Model;[void](New-HubRequest $archiveUnknownModel "R5" "archive unknown" @("modify"));$unknownArchivePredecessor=Confirm-HubRequest $archiveUnknownModel "R5"
+    Assert(-not(Continue-ExecutionTask $archiveUnknownModel "R5" $true 4 "created_gated" "unknown")) "unknown predecessor archive activated the successor"
+    $unknownArchiveIntent=$archiveUnknownModel.RotationIntents["R5"];$unknownArchiveSuccessor=$unknownArchiveIntent.SuccessorThreadId
+    Assert($archiveUnknownModel.Active.ThreadId-ceq$unknownArchivePredecessor-and$archiveUnknownModel.NativeCreateAttempts-eq1-and$archiveUnknownModel.NativeArchiveAttempts-eq1-and$archiveUnknownModel.Archived.Count-eq0) "unknown archive changed identity, repeated creation, or archived the predecessor"
+    Assert(-not(($archiveUnknownModel.ExecutionActions-join",").Contains("$unknownArchivePredecessor`:continued-archived"))) "unknown archive marked the predecessor continued_archived"
+    Assert(Continue-ExecutionTask $archiveUnknownModel "R5" $true 5 "unknown" "success") "unknown-archive retry did not recover the exact gated successor"
+    Assert($archiveUnknownModel.NativeCreateAttempts-eq1-and$archiveUnknownModel.NativeArchiveAttempts-eq2-and$archiveUnknownModel.Active.ThreadId-ceq$unknownArchiveSuccessor-and$archiveUnknownModel.Created.Count-eq2) "unknown-archive retry repeated creation or changed successor identity"
+    Assert($archiveUnknownModel.Archived.Count-eq1-and$archiveUnknownModel.Archived[0]-ceq$unknownArchivePredecessor-and$unknownArchiveIntent.State-ceq"activated") "unknown-archive retry did not close the exact predecessor intent"
+
+    $creationUnknownModel=New-Model;[void](New-HubRequest $creationUnknownModel "R6" "creation unknown" @("modify"));$creationUnknownPredecessor=Confirm-HubRequest $creationUnknownModel "R6"
+    Assert(-not(Continue-ExecutionTask $creationUnknownModel "R6" $true 4 "unknown" "success")) "unknown successor creation archived the predecessor or activated a successor"
+    $creationUnknownIntent=$creationUnknownModel.RotationIntents["R6"];$intendedSuccessor=$creationUnknownIntent.SuccessorThreadId
+    Assert($creationUnknownIntent.State-ceq"creation_unknown"-and$creationUnknownIntent.PredecessorThreadId-ceq$creationUnknownPredecessor-and$creationUnknownModel.Active.ThreadId-ceq$creationUnknownPredecessor) "unknown creation did not retain the durable intent and original identity"
+    Assert($creationUnknownModel.NativeCreateAttempts-eq1-and$creationUnknownModel.NativeArchiveAttempts-eq0-and$creationUnknownModel.Created.Count-eq1-and$creationUnknownModel.Archived.Count-eq0) "unknown creation fabricated a created successor or attempted predecessor archive"
+    Assert(-not(Continue-ExecutionTask $creationUnknownModel "R6" $true 5 "created_gated" "success")) "unknown creation retry repeated create or skipped exact recovery"
+    Assert($creationUnknownModel.NativeCreateAttempts-eq1-and$creationUnknownModel.NativeArchiveAttempts-eq0-and$creationUnknownModel.Created.Count-eq1-and$creationUnknownModel.Active.ThreadId-ceq$creationUnknownPredecessor) "unknown creation retry changed identity or repeated a native call"
+    Assert(-not(Resolve-UnknownSuccessor $creationUnknownModel "R6" "task-R6-wrong" "success")) "unknown creation accepted a non-matching successor identity"
+    Assert(Resolve-UnknownSuccessor $creationUnknownModel "R6" $intendedSuccessor "success") "unknown creation did not recover the exact intended successor"
+    Assert($creationUnknownModel.NativeCreateAttempts-eq1-and$creationUnknownModel.NativeArchiveAttempts-eq1-and$creationUnknownModel.Created.Count-eq2-and$creationUnknownModel.Active.ThreadId-ceq$intendedSuccessor) "exact unknown-create recovery repeated creation or activated a different successor"
+    Assert($creationUnknownModel.Archived.Count-eq1-and$creationUnknownModel.Archived[0]-ceq$creationUnknownPredecessor-and$creationUnknownIntent.State-ceq"activated") "exact unknown-create recovery did not close the predecessor intent"
+
+    $memoryFailureModel=New-Model;[void](New-HubRequest $memoryFailureModel "R7" "memory ordering" @("inspect"));$memoryFailureThread=Confirm-HubRequest $memoryFailureModel "R7"
+    Assert(Complete-Round $memoryFailureModel "R7" $completion) "memory-ordering completion failed"
+    Assert(-not(Self-ArchiveAccepted $memoryFailureModel "R7" ([ordered]@{success=$true;archivedTaskId=$memoryFailureThread}) "" "not accepted" $false "success")) "non-acceptance triggered memory sync or archive"
+    Assert($memoryFailureModel.StateOnlySyncs-eq0-and$memoryFailureModel.AcceptanceMemory.Count-eq0-and$memoryFailureModel.AcceptanceArchiveAttempts-eq0-and$memoryFailureModel.Archived.Count-eq0) "non-acceptance changed acceptance state"
+    Assert(-not(Self-ArchiveAccepted $memoryFailureModel "R7" ([ordered]@{success=$true;archivedTaskId=$memoryFailureThread}) "" "接受" $true "failure")) "memory failure proceeded to archive"
+    Assert($memoryFailureModel.Active.State-ceq"awaiting_acceptance"-and$memoryFailureModel.StateOnlySyncs-eq0-and$memoryFailureModel.AcceptanceMemory.Count-eq0-and$memoryFailureModel.AcceptanceArchiveAttempts-eq0-and$memoryFailureModel.Archived.Count-eq0) "memory failure wrote acceptance state or attempted archive"
+    Assert(Self-ArchiveAccepted $memoryFailureModel "R7" ([ordered]@{success=$true;archivedTaskId=$memoryFailureThread}) "" "接受" $true "success") "memory-ordering retry did not sync then archive"
+    Assert($memoryFailureModel.StateOnlySyncs-eq1-and$memoryFailureModel.AcceptanceArchiveAttempts-eq1-and$memoryFailureModel.Archived.Count-eq1) "successful memory retry did not precede exactly one archive attempt"
+
+    $stateOnlyModel=New-Model;[void](New-HubRequest $stateOnlyModel "R3" "standalone" @("inspect"));$stateOnlyThread=Confirm-HubRequest $stateOnlyModel "R3"
+    Assert(Complete-Round $stateOnlyModel "R3" $completion) "standalone completion failed"
+    Assert(-not(Self-ArchiveAccepted $stateOnlyModel "R3" $null "" "接受")) "unknown state-only archive ended request"
+    Assert($stateOnlyModel.Active.State-ceq"awaiting_acceptance"-and$stateOnlyModel.StateOnlySyncs-eq1-and$stateOnlyModel.AcceptanceArchiveAttempts-eq1-and$stateOnlyModel.Archived.Count-eq0) "unknown state-only archive did not preserve one synced receipt"
+    Assert(Self-ArchiveAccepted $stateOnlyModel "R3" ([ordered]@{success=$true;archivedTaskId=$stateOnlyThread}) "" "接受") "state-only request archival failed"
+    Assert($stateOnlyModel.StateOnlySyncs-eq1-and$stateOnlyModel.AcceptedSteps.Count-eq0-and$stateOnlyModel.AcceptanceArchiveAttempts-eq2-and$stateOnlyModel.Created.Count-eq1) "unmapped standalone request repeated its receipt, guessed a plan step, or created a successor"
 
     $queuedModel=New-Model;[void](New-HubRequest $queuedModel "Q1" "queued" @("inspect"));$queuedId=Confirm-HubRequest $queuedModel "Q1" "queued";$queuedHubActions=$queuedModel.HubActions.Count
     Assert($queuedId-ceq"client-Q1-g1"-and$queuedModel.Created.Count-eq1) "queued identity was not created once"
@@ -217,5 +311,4 @@ try {
     Assert($upgradeModel.Created.Count-eq$createdBefore-and$upgradeModel.Active.ThreadId-ceq$upgradeTask) "non-empty active snapshot created a second task or replaced the upgrade task"
     Assert(Start-UpgradeFileTransaction $upgradeModel @()) "empty active snapshot did not permit the file transaction"
     Assert($upgradeModel.FileTransactions-eq1-and$upgradeModel.Created.Count-eq1-and$upgradeModel.Archived.Count-eq0) "empty-snapshot transaction changed task lifecycle"
-    Write-Host "Five-slot scheduling, hub handoff, deployment exception, ordinary Markdown review, and self-archive tests passed."
-} finally { if(Test-Path -LiteralPath $temp){Remove-Item -LiteralPath $temp -Recurse -Force} }
+    Write-Host "Five-slot scheduling, hub handoff, request authorization, and self-archive tests passed."

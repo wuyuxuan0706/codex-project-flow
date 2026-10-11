@@ -69,6 +69,133 @@ PY
 }
 
 # The full regression exercises the shared engine directly.
+"$python_cmd" -m unittest -v tests/test-project-memory.py
+# Portable protocol-state simulation only: native task APIs remain PowerShell/native-environment coverage.
+"$python_cmd" - "$tmp/rotation-intent.json" <<'PY'
+import json,pathlib,sys
+
+path=pathlib.Path(sys.argv[1])
+
+def write(value):
+ temporary=path.with_suffix(".next")
+ temporary.write_text(json.dumps(value,sort_keys=True)+"\n",encoding="utf-8")
+ temporary.replace(path)
+
+def read():
+ return json.loads(path.read_text(encoding="utf-8"))
+
+def fresh(request):
+ value={"request":request,"active":{"thread":f"task-{request}-g1","generation":1},"created":[f"task-{request}-g1"],"archived":[],"intent":None,"create_calls":0,"archive_calls":0,"events":[]}
+ write(value);return value
+
+def archive(value,outcome):
+ intent=value["intent"]
+ assert intent["state"]=="created_gated" and value["active"]["thread"]==intent["predecessor"]
+ value["archive_calls"]+=1
+ if outcome!="success":
+  value["events"].append(f"archive-{outcome}");write(value);return False
+ value["archived"].append(intent["predecessor"])
+ value["active"]={"thread":intent["successor"],"generation":intent["generation"]}
+ intent["state"]="activated";value["events"].append("continued-archived");write(value);return True
+
+def continue_request(create_outcome="created_gated",archive_outcome="success"):
+ value=read();intent=value["intent"]
+ if intent is None:
+  predecessor=value["active"]["thread"];generation=value["active"]["generation"]+1
+  successor=f"task-{value['request']}-g{generation}"
+  value["intent"]={"predecessor":predecessor,"successor":successor,"generation":generation,"state":"intent_persisted"}
+  value["events"].append("intent-persisted");write(value)
+  value=read();value["create_calls"]+=1
+  if create_outcome=="unknown":
+   value["intent"]["state"]="creation_unknown";value["events"].append("creation-unknown");write(value);return False
+  value["created"].append(successor);value["intent"]["state"]="created_gated";value["events"].append("created-gated");write(value)
+ elif intent["state"]=="creation_unknown":
+  value["events"].append("creation-unknown-await-recovery");write(value);return False
+ elif intent["state"]!="created_gated":
+  return False
+ return archive(read(),archive_outcome)
+
+def resolve_unknown(exact_successor,archive_outcome="success"):
+ value=read();intent=value["intent"]
+ if intent is None or intent["state"]!="creation_unknown" or intent["successor"]!=exact_successor:
+  return False
+ value["created"].append(intent["successor"]);intent["state"]="created_gated";value["events"].append("creation-recovered-exact");write(value)
+ return archive(read(),archive_outcome)
+
+for request,outcome in (("portable-failure","failure"),("portable-unknown","unknown")):
+ fresh(request);predecessor=read()["active"]["thread"]
+ assert not continue_request("created_gated",outcome)
+ failed=read();successor=failed["intent"]["successor"]
+ assert failed["active"]["thread"]==predecessor and failed["intent"]["state"]=="created_gated"
+ assert failed["create_calls"]==1 and failed["archive_calls"]==1 and failed["archived"]==[]
+ assert "continued-archived" not in failed["events"]
+ assert continue_request("unknown","success")
+ recovered=read()
+ assert recovered["active"]["thread"]==successor and recovered["created"].count(successor)==1
+ assert recovered["create_calls"]==1 and recovered["archive_calls"]==2 and recovered["archived"]==[predecessor]
+
+fresh("portable-create-unknown");original=read()["active"]["thread"]
+assert not continue_request("unknown","success")
+uncertain=read();successor=uncertain["intent"]["successor"]
+assert uncertain["active"]["thread"]==original and uncertain["intent"]["state"]=="creation_unknown"
+assert uncertain["create_calls"]==1 and uncertain["archive_calls"]==0 and uncertain["created"]==[original] and uncertain["archived"]==[]
+assert not continue_request("created_gated","success")
+retried=read()
+assert retried["create_calls"]==1 and retried["archive_calls"]==0 and retried["active"]["thread"]==original
+assert not resolve_unknown("task-portable-create-unknown-wrong","success")
+assert resolve_unknown(successor,"success")
+resolved=read()
+assert resolved["create_calls"]==1 and resolved["archive_calls"]==1 and resolved["active"]["thread"]==successor
+assert resolved["created"].count(successor)==1 and resolved["archived"]==[original]
+
+def fresh_acceptance(request):
+ thread=f"task-{request}-g1"
+ value={"request":request,"active":{"thread":thread,"state":"awaiting_acceptance"},"acceptance_memory":None,"accepted_steps":[],"state_receipts":0,"archive_calls":0,"archived":[],"events":[]}
+ write(value);return value
+
+def accept_and_archive(mapped_step="",human_accepted=True,memory_outcome="success",archive_outcome="success",archived_id=None):
+ value=read();thread=value["active"]["thread"];mode="mapped_step" if mapped_step else "state_only"
+ memory=value["acceptance_memory"]
+ if memory is None:
+  if not human_accepted:
+   return False
+  if memory_outcome!="success":
+   value["events"].append("acceptance-memory-failed");write(value);return False
+  value["acceptance_memory"]={"thread":thread,"mode":mode,"mapped_step":mapped_step,"state":"synced"}
+  if mode=="mapped_step":
+   value["accepted_steps"].append(mapped_step)
+  else:
+   value["state_receipts"]+=1
+  value["events"].append("acceptance-memory-synced");write(value)
+  value=read();memory=value["acceptance_memory"]
+ if memory!={"thread":thread,"mode":mode,"mapped_step":mapped_step,"state":"synced"}:
+  return False
+ value["archive_calls"]+=1
+ if archive_outcome!="success" or archived_id!=thread:
+  value["events"].append(f"acceptance-archive-{archive_outcome}");write(value);return False
+ value["archived"].append(thread);value["active"]["state"]="accepted_archived";value["events"].append("acceptance-self-archived");write(value);return True
+
+for request,outcome in (("accept-failure","failure"),("accept-unknown","unknown")):
+ fresh_acceptance(request);thread=read()["active"]["thread"]
+ assert not accept_and_archive("S01",True,"success",outcome,thread)
+ pending=read()
+ assert pending["active"]["state"]=="awaiting_acceptance" and pending["accepted_steps"]==["S01"] and pending["archive_calls"]==1 and pending["archived"]==[]
+ assert accept_and_archive("S01",True,"success","success",thread)
+ accepted=read()
+ assert accepted["accepted_steps"]==["S01"] and accepted["archive_calls"]==2 and accepted["archived"]==[thread]
+
+fresh_acceptance("accept-memory-failure");thread=read()["active"]["thread"]
+assert not accept_and_archive("",False,"success","success",thread)
+not_accepted=read()
+assert not_accepted["acceptance_memory"] is None and not_accepted["state_receipts"]==0 and not_accepted["archive_calls"]==0
+assert not accept_and_archive("",True,"failure","success",thread)
+memory_failed=read()
+assert memory_failed["acceptance_memory"] is None and memory_failed["state_receipts"]==0 and memory_failed["archive_calls"]==0 and memory_failed["archived"]==[]
+assert accept_and_archive("",True,"success","success",thread)
+memory_recovered=read()
+assert memory_recovered["state_receipts"]==1 and memory_recovered["archive_calls"]==1 and memory_recovered["archived"]==[thread]
+print("Portable continuation and acceptance-memory state-file simulations passed (native task APIs not exercised).")
+PY
 "$engine" validate --allow-placeholders "$repo"
 [ ! -e "$repo/.project-flow/transaction.lock" ]
 if "$engine" validate "$repo" >/dev/null 2>&1; then
@@ -79,13 +206,15 @@ clean="$tmp/clean"
 mkdir "$clean"
 "$engine" install --target "$clean" --project-name Clean
 probe_json=$("$engine" probe --target "$clean")
-"$python_cmd" -c 'import json,sys; value=json.loads(sys.argv[1]); assert value["managed"] and value["managed_files"]==6' "$probe_json"
+"$python_cmd" -c 'import json,sys; value=json.loads(sys.argv[1]); assert value["managed"] and value["managed_files"]==8' "$probe_json"
 "$engine" validate --target "$clean"
 "$python_cmd" - "$clean" "$repo/VERSION" <<'PY'
 import json,pathlib,sys
 root=pathlib.Path(sys.argv[1])
 manifest=json.loads((root/".project-flow/manifest.json").read_text())
-assert manifest["workflow_version"]==pathlib.Path(sys.argv[2]).read_text(encoding="utf-8-sig").strip() and len(manifest["files"])==6
+assert manifest["workflow_version"]==pathlib.Path(sys.argv[2]).read_text(encoding="utf-8-sig").strip() and len(manifest["files"])==8
+assert (root/"docs/PROJECT_PLAN.md").is_file()
+assert (root/".agents/skills/project-workflow-manager/scripts/project-memory.py").is_file()
 for relative in [".agents/prompts/08_result_handoff.md",".agents/snippets/AGENTS.integration.md","docs/WORKFLOW_GUIDE.md","docs/DEVELOPMENT_SOP.md"]:
  assert not (root/relative).exists()
 PY
@@ -162,11 +291,14 @@ mutations={
  "fallback":lambda: value["upgrade"]["discovery"].__setitem__("fallback","never"),
  "request":lambda: value["tasks"].__setitem__("request_key",value["tasks"]["request_key"].replace("requestId=<exactRequestId>; ","")),
  "request_timing":lambda: value["requests"].__setitem__("request_id_assignment","after_task_creation"),
+ "request_states":lambda: value["requests"].__setitem__("states",value["requests"]["states"][:-1]),
  "initial_owner":lambda: value["requests"].__setitem__("initial_owner","execution_task"),
  "handoff_boundary":lambda: value["requests"].__setitem__("handoff_boundary","after_completion"),
  "post_handoff_owner":lambda: value["requests"].__setitem__("post_handoff_owner","hub"),
  "hub_post_handoff":lambda: value["requests"].__setitem__("hub_post_handoff","route_messages"),
+ "task_binding":lambda: value["requests"].__setitem__("execution_task_binding","one_exact_visible_task_per_request"),
  "acceptance_owner":lambda: value["requests"].__setitem__("acceptance_owner","coordinator"),
+ "acceptance_archive":lambda: value["requests"].__setitem__("acceptance_archive","archive_without_memory_sync"),
  "rejection_route":lambda: value["requests"].__setitem__("rejection_route","create_new_task"),
  "scope_change_route":lambda: value["requests"].__setitem__("scope_change_route","return_to_hub"),
  "acceptance_slot":lambda: value["requests"].__setitem__("awaiting_acceptance_occupies_slot",False),
@@ -176,11 +308,17 @@ mutations={
  "replacement":lambda: value["execution"].__setitem__("replacement","automatic"),
  "serial":lambda: value["execution"].__setitem__("serial",["high_risk"]),
  "document":lambda: value["documents"].__setitem__("default_extension",".docx"),
- "document_review":lambda: value["documents"]["review"].__setitem__("required",False),
- "document_evidence":lambda: value["documents"]["review"].__setitem__("approval_evidence","unbound_chat_approval"),
- "bootstrap_markdown_exception":lambda: value["documents"]["review"]["exceptions"].__setitem__("bootstrap_managed_markdown","review_required"),
- "upgrade_markdown_exception":lambda: value["documents"]["review"]["exceptions"].__setitem__("upgrade_managed_markdown","review_required"),
+ "memory_completion":lambda: value["project_memory"].__setitem__("step_completion","automatic"),
+ "planning_creation":lambda: value["planning"].__setitem__("creation","create_then_record"),
+ "planning_interview":lambda: value["planning"].__setitem__("interview","passive_questionnaire"),
+ "planning_interview_rules":lambda: value["planning"].__setitem__("interview_rules","docs/PROJECT_PLAN.md"),
+ "planning_interview_memory":lambda: value["planning"].__setitem__("interview_memory","summary_only"),
+ "planning_interview_completion":lambda: value["planning"].__setitem__("interview_completion","model_decides"),
+ "planning_continuation_request_id":lambda: value["planning"].__setitem__("continuation_request_id","random_each_time"),
+ "planning_continuation_key":lambda: value["planning"].__setitem__("continuation_key","title_only"),
  "rotation":lambda: value["rotation"].__setitem__("mode","automatic"),
+ "rotation_threshold":lambda: value["rotation"].__setitem__("context_threshold",80),
+ "rotation_continue":lambda: value["rotation"].__setitem__("continue","archive_then_create"),
  "snapshot":lambda: value["upgrade"]["reconcile"].__setitem__("active_snapshot","automatic"),
  "successor":lambda: value["upgrade"]["reconcile"].__setitem__("successor_creation","parallel"),
  "order":lambda: value["upgrade"]["reconcile"].__setitem__("pair_order",["archive_predecessor","queue_successor"]),
@@ -211,11 +349,14 @@ reject_contract_mutation history 'discovery history'
 reject_contract_mutation fallback 'discovery fallback'
 reject_contract_mutation request 'request key'
 reject_contract_mutation request_timing 'request ID assignment'
+reject_contract_mutation request_states 'request states'
 reject_contract_mutation initial_owner 'request initial owner'
 reject_contract_mutation handoff_boundary 'request handoff boundary'
 reject_contract_mutation post_handoff_owner 'request post-handoff owner'
 reject_contract_mutation hub_post_handoff 'request hub post-handoff'
+reject_contract_mutation task_binding 'request task binding'
 reject_contract_mutation acceptance_owner 'request acceptance owner'
+reject_contract_mutation acceptance_archive 'request acceptance archive'
 reject_contract_mutation rejection_route 'request rejection route'
 reject_contract_mutation scope_change_route 'request scope-change route'
 reject_contract_mutation acceptance_slot 'request acceptance slot'
@@ -225,11 +366,17 @@ reject_contract_mutation scope 'scope change'
 reject_contract_mutation replacement 'replacement'
 reject_contract_mutation serial 'serial execution'
 reject_contract_mutation document 'document extension'
-reject_contract_mutation document_review 'document review required'
-reject_contract_mutation document_evidence 'document review evidence'
-reject_contract_mutation bootstrap_markdown_exception 'bootstrap Markdown review exception'
-reject_contract_mutation upgrade_markdown_exception 'upgrade Markdown review exception'
+reject_contract_mutation memory_completion 'project memory step completion'
+reject_contract_mutation planning_creation 'planning creation'
+reject_contract_mutation planning_interview 'planning interview'
+reject_contract_mutation planning_interview_rules 'planning interview rules'
+reject_contract_mutation planning_interview_memory 'planning interview memory'
+reject_contract_mutation planning_interview_completion 'planning interview completion'
+reject_contract_mutation planning_continuation_request_id 'planning continuation request id'
+reject_contract_mutation planning_continuation_key 'planning continuation key'
 reject_contract_mutation rotation 'rotation mode'
+reject_contract_mutation rotation_threshold 'rotation context threshold'
+reject_contract_mutation rotation_continue 'rotation continue'
 reject_contract_mutation snapshot 'active snapshot'
 reject_contract_mutation successor 'reconcile fields are invalid'
 reject_contract_mutation order 'reconcile fields are invalid'
@@ -266,7 +413,7 @@ root=pathlib.Path(sys.argv[1])/"baselines"
 print(" ".join(sorted((p.name for p in root.iterdir() if p.is_dir()),key=lambda x:tuple(map(int,x.split("."))))))
 PY
 )
-[ "$versions" = "0.8.3 0.9.0 0.9.1 0.10.0 0.11.0" ]
+[ "$versions" = "0.8.3 0.9.0 0.9.1 0.10.0 0.11.0 0.12.0 0.13.0" ]
 for version in $versions; do
   root="$tmp/plan-$version"
   fixture "$version" "plan-$version"
@@ -287,12 +434,16 @@ set -e
 [ "$unsupported_status" -ne 0 ]
 printf '%s\n' "$unsupported_error" | grep -Fq 'No supported migration from 0.8.2'
 
-for patch_version in 0.9.0 0.9.1 0.10.0 0.11.0; do
+for patch_version in 0.8.3 0.9.0 0.9.1 0.10.0 0.11.0 0.12.0 0.13.0; do
 patch_upgrade="$tmp/patch-upgrade-$patch_version"
 fixture "$patch_version" "patch-upgrade-$patch_version"
+printf '# Custom plan\n\n## 目标\n\n保留计划。\n\n## 总体进度\n\n0%%\n\n## 任务步骤\n\n- [ ] S01 | 保留\n' > "$patch_upgrade/docs/PROJECT_PLAN.md"
+printf '# Custom state\n\n## 当前目标\n\n保留状态。\n' > "$patch_upgrade/docs/PROJECT_STATE.md"
 cp -R "$patch_upgrade" "$tmp/patch-before-$patch_version"
 patch_plan=$("$engine" plan --target "$patch_upgrade")
 printf '%s\n' "$patch_plan" | grep -Fq "UPGRADE $patch_version -> $current_version"
+printf '%s\n' "$patch_plan" | grep -Eq '^PRESERVE[[:space:]]+seed_once[[:space:]]+docs/PROJECT_PLAN.md$'
+printf '%s\n' "$patch_plan" | grep -Eq '^PRESERVE[[:space:]]+seed_once[[:space:]]+docs/PROJECT_STATE.md$'
 patch_deletes=$(printf '%s\n' "$patch_plan" | grep -c '^DELETE' || true)
 [ "$patch_deletes" -eq 0 ]
 "$engine" apply --target "$patch_upgrade"
@@ -301,7 +452,9 @@ patch_txn=$("$python_cmd" - "$patch_upgrade" "$repo/VERSION" <<'PY'
 import json,pathlib,sys
 root=pathlib.Path(sys.argv[1]);version=pathlib.Path(sys.argv[2]).read_text(encoding="utf-8-sig").strip()
 manifest=json.loads((root/".project-flow/manifest.json").read_text(encoding="utf-8"))
-assert manifest["workflow_version"]==version and len(manifest["files"])==6
+assert manifest["workflow_version"]==version and len(manifest["files"])==8
+assert (root/"docs/PROJECT_PLAN.md").read_text(encoding="utf-8").startswith("# Custom plan\n")
+assert (root/"docs/PROJECT_STATE.md").read_text(encoding="utf-8").startswith("# Custom state\n")
 print(manifest["last_transaction"])
 PY
 )
@@ -397,7 +550,7 @@ txn=$("$python_cmd" - "$upgrade" "$repo/VERSION" <<'PY'
 import hashlib,json,pathlib,sys
 root=pathlib.Path(sys.argv[1])
 manifest=json.loads((root/".project-flow/manifest.json").read_text())
-assert manifest["workflow_version"]==pathlib.Path(sys.argv[2]).read_text(encoding="utf-8-sig").strip() and len(manifest["files"])==6
+assert manifest["workflow_version"]==pathlib.Path(sys.argv[2]).read_text(encoding="utf-8-sig").strip() and len(manifest["files"])==8
 assert (root/".agents/WORKFLOW_PROTOCOL.md").is_file()
 meta=json.loads((root/".project-flow/transactions"/manifest["last_transaction"]/"transaction.json").read_text())
 normalized=(root/".project-flow/manifest.json").read_text(encoding="utf-8-sig").replace("\r\n","\n").replace("\r","\n")
@@ -684,16 +837,14 @@ fi
 for invariant in 'self.assert_preconditions(plans, old_manifest_hash)' 'Written manifest hash does not match the prepared transaction' 'automatic rollback also failed'; do
   grep -Fq "$invariant" "$repo/scripts/project-flow.sh"
 done
-grep -Fq '"schema_version": 11' "$repo/.agents/workflow.json"
-for request_contract in '"max_active": 5' '"request_key": "[codex-project-flow:request:v1] projectId=<exactProjectId>; hubThreadId=<exactHubThreadId>; requestId=<exactRequestId>; generation=1"' '"request_id_assignment": "hub_before_first_work_output"' '"states": ["awaiting_authorization", "queued", "active", "awaiting_acceptance", "revision_pending", "accepted_archived"]' '"confirmation_fields": ["understanding", "execution_items"]' '"completion_fields": ["changes", "verification", "uncovered", "risk"]' '"initial_owner": "hub"' '"handoff_boundary": "exact_or_queued_execution_task_identity_established"' '"post_handoff_owner": "execution_task"' '"hub_post_handoff": "no_participation_for_same_request"' '"acceptance_owner": "execution_task"' '"acceptance_archive": "exact_self_archive_success_and_matching_archived_task_id_required"' '"rejection_route": "execution_task_reconfirm_in_place"' '"scope_change_route": "execution_task_reconfirm_in_place"' '"awaiting_acceptance_occupies_slot": true' '"supplemental_authorization": "continue_original_task"' '"different_goal": "parallel_when_disjoint_and_slot_available_else_queue"' '"scope_change": "pause_for_execution_task_confirmation_then_continue_original_task"' '"replacement": "explicit_user_authorization"' '"serial": ["same_request", "overlapping_paths", "upgrade_file_transaction"]';do
+grep -Fq '"schema_version": 13' "$repo/.agents/workflow.json"
+for request_contract in '"max_active": 5' '"request_key": "[codex-project-flow:request:v1] projectId=<exactProjectId>; hubThreadId=<exactHubThreadId>; requestId=<exactRequestId>; generation=1"' '"request_id_assignment": "hub_before_first_work_output"' '"states": ["awaiting_authorization", "queued", "active", "awaiting_acceptance", "revision_pending", "accepted_archived", "paused_archived", "continued_archived"]' '"confirmation_fields": ["understanding", "execution_items"]' '"completion_fields": ["changes", "verification", "uncovered", "risk"]' '"initial_owner": "hub"' '"handoff_boundary": "exact_or_queued_execution_task_identity_established"' '"post_handoff_owner": "execution_task"' '"hub_post_handoff": "no_participation_for_same_request"' '"execution_task_binding": "one_current_visible_task_per_request_with_authorized_successor"' '"acceptance_owner": "execution_task"' '"acceptance_archive": "sync_explicitly_mapped_step_or_state_only_then_exact_self_archive_without_next_step"' '"rejection_route": "execution_task_reconfirm_in_place"' '"scope_change_route": "execution_task_reconfirm_in_place"' '"awaiting_acceptance_occupies_slot": true' '"supplemental_authorization": "continue_original_task"' '"different_goal": "parallel_when_disjoint_and_slot_available_else_queue"' '"scope_change": "pause_for_execution_task_confirmation_then_continue_original_task"' '"replacement": "explicit_user_authorization"' '"serial": ["same_request", "overlapping_paths", "upgrade_file_transaction"]';do
  grep -Fq "$request_contract" "$repo/.agents/workflow.json"
 done
-for document_contract in '"default_extension": ".md"' '"standalone_cover": false' '"first_heading": "#"' '"heading_progression": "no_skipped_levels"' '"validation_scope": "created_or_updated_delivery_documents"' '"required": true' '"scope": "all_new_or_modified_non_deployment_markdown_documents"' '"draft_delivery": "complete_plain_text_in_chat_before_write"' '"states": ["draft_pending_review", "approved_for_write", "revision_required", "written"]' '"approval_evidence": "explicit_user_chat_approval_bound_to_exact_path_and_content_sha256"' '"write_authorization": "approved_exact_content_only"';do
+for document_contract in '"default_extension": ".md"' '"standalone_cover": false' '"first_heading": "#"' '"heading_progression": "no_skipped_levels"' '"validation_scope": "created_or_updated_delivery_documents"';do
  grep -Fq "$document_contract" "$repo/.agents/workflow.json"
 done
-for deployment_exception in '"bootstrap_managed_markdown": "no_draft_review_for_install_or_recovery"' '"upgrade_managed_markdown": "no_draft_review_for_apply_resume_or_rollback"' '"non_deployment_markdown": "normal_review_required"'; do
- grep -Fq "$deployment_exception" "$repo/.agents/workflow.json"
-done
+if grep -Fq '"review"' "$repo/.agents/workflow.json"; then echo "retired document review contract remains" >&2; exit 1; fi
 for bootstrap_contract in '"registry_path": ".project-flow/hub.json"' '"lock_path": ".project-flow/bootstrap.lock"' '"fast_path": "registry_targeted_read"' '"recovery_path": "exhaustive_metadata_on_exception"' '"title_identity": "saved_project_binding_plus_mutation_thread"' '"unarchive": "only_when_explicitly_archived"' '"lock_inspect": "validated_read_only"' '"existing_lock": "inspect_then_recover_or_stop"' '"claim_title": "[cpf-claim] <shortClaimId>"';do
  grep -Fq "$bootstrap_contract" "$repo/.agents/workflow.json"
 done
@@ -722,7 +873,17 @@ grep -Fq '"listing": "exhaustive_metadata"' "$repo/.agents/workflow.json"
 grep -Fq '"history": "targeted"' "$repo/.agents/workflow.json"
 grep -Fq '"fallback": "full_on_ambiguity"' "$repo/.agents/workflow.json"
 grep -Fq '"zero_active_fast_path": true' "$repo/.agents/workflow.json"
-grep -Fq '"mode": "explicit_user_authorization_only"' "$repo/.agents/workflow.json"
+grep -Fq '"mode": "manual_natural_language_continue_or_pause"' "$repo/.agents/workflow.json"
+grep -Fq '"startup_read": ["project_plan", "project_state"]' "$repo/.agents/workflow.json"
+grep -Fq '"step_completion": "explicit_user_acceptance_only"' "$repo/.agents/workflow.json"
+grep -Fq '"role": "separate_user_visible_planning_chat"' "$repo/.agents/workflow.json"
+grep -Fq '"creation": "durable_intent_then_one_create_and_bind_exact_or_queued_identity"' "$repo/.agents/workflow.json"
+grep -Fq '"interview": "grilling_proactive_dependency_frontier_rounds"' "$repo/.agents/workflow.json"
+grep -Fq '"interview_rules": ".agents/WORKFLOW_PROTOCOL.md#grilling-主动访谈"' "$repo/.agents/workflow.json"
+grep -Fq '"interview_memory": "state_decisions_dependencies_unanswered_questions_next_frontier"' "$repo/.agents/workflow.json"
+grep -Fq '"interview_completion": "all_relevant_boundaries_settled_then_explicit_user_confirmation"' "$repo/.agents/workflow.json"
+grep -Fq '"context_threshold": null' "$repo/.agents/workflow.json"
+grep -Fq '"continue": "save_then_create_gated_successor_then_archive_predecessor"' "$repo/.agents/workflow.json"
 grep -Fq '"protocol": 4' "$repo/.agents/workflow.json"
 grep -Fq '"active_snapshot": "empty_required_before_file_transaction_fail_closed"' "$repo/.agents/workflow.json"
 grep -Fq '"creation_gate": "hub_exhaustive_check_blocks_on_provisional_and_active_before_every_creation"' "$repo/.agents/workflow.json"
@@ -748,4 +909,6 @@ grep -Fq '"provisional": "[codex-project-flow:upgrade-barrier:v1] state=provisio
 grep -Fq '"active": "[codex-project-flow:upgrade-barrier:v1] state=active; projectId=<exactProjectId>; coordinatorThreadId=<exactCoordinatorThreadId>; sourceVersion=<exactSourceVersion>; targetVersion=<exactTargetVersion>; generation=<positiveInteger>"' "$repo/.agents/workflow.json"
 grep -Fq '"released": "[codex-project-flow:upgrade-barrier:v1] state=released; projectId=<exactProjectId>; coordinatorThreadId=<exactCoordinatorThreadId>; sourceVersion=<exactSourceVersion>; targetVersion=<exactTargetVersion>; generation=<positiveInteger>"' "$repo/.agents/workflow.json"
 grep -Fq '"cancelled": "[codex-project-flow:upgrade-barrier:v1] state=cancelled; projectId=<exactProjectId>; mode=<exactMode>; sourceVersion=<exactSourceVersion>; targetVersion=<exactTargetVersion>; claimId=<exactClaimId>"' "$repo/.agents/workflow.json"
+PYTHONDONTWRITEBYTECODE=1 "$python_cmd" "$repo/tests/test-model-defaults.py"
+PYTHONDONTWRITEBYTECODE=1 "$python_cmd" "$repo/tests/test-upgrade-hub-refresh.py"
 echo "All POSIX regression tests passed."

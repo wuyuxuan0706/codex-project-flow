@@ -9,6 +9,15 @@ $utf8 = [Text.UTF8Encoding]::new($false)
 
 function Assert([bool]$Condition, [string]$Message) { if (-not $Condition) { throw $Message } }
 function Write-Utf8([string]$Path, [string]$Text) { [IO.File]::WriteAllText($Path, $Text, $utf8) }
+function ConvertFrom-JsonExactStrings([string]$Text) {
+    $command = Get-Command ConvertFrom-Json
+    if ($command.Parameters.ContainsKey("DateKind")) { return $Text | ConvertFrom-Json -DateKind String }
+    $value = $Text | ConvertFrom-Json
+    foreach ($name in @("createdAt", "renewedAt", "expiresAt", "staleAt", "updatedAt")) {
+        if ($Text -match ('"' + [regex]::Escape($name) + '"\s*:\s*"([^"\\]*(?:\\.[^"\\]*)*)"')) { $value.$name = $matches[1] }
+    }
+    return $value
+}
 function Invoke-Engine([string[]]$Arguments) {
     $start = [Diagnostics.ProcessStartInfo]::new()
     $start.FileName = [Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
@@ -49,7 +58,7 @@ try {
     $lockBeforeInspect = [IO.File]::ReadAllBytes($lockPath)
     $result = Invoke-Engine @("bootstrap-lock-inspect", "-Target", $root, "-ProjectId", $project)
     Assert ($result.ExitCode -eq 0) ("initial lock inspect failed: " + $result.StdErr)
-    $inspection = $result.StdOut | ConvertFrom-Json -DateKind String
+    $inspection = ConvertFrom-JsonExactStrings $result.StdOut
     Assert ($inspection.ownerId -ceq $ownerA -and $inspection.isStale -eq $false -and $inspection.staleAt) "initial lock inspection contract"
     Assert (([Convert]::ToBase64String($lockBeforeInspect)) -ceq ([Convert]::ToBase64String([IO.File]::ReadAllBytes($lockPath)))) "lock inspect changed the lock file"
     $result = Invoke-Engine @("bootstrap-lock-acquire", "-Target", $root, "-ProjectId", $project, "-OwnerId", $ownerB, "-Phase", "install")
@@ -113,7 +122,7 @@ try {
     $staleBeforeInspect = [IO.File]::ReadAllBytes($lockPath)
     $result = Invoke-Engine @("bootstrap-lock-inspect", "-Target", $root, "-ProjectId", $project)
     Assert ($result.ExitCode -eq 0) ("stale lock inspect failed: " + $result.StdErr)
-    $inspection = $result.StdOut | ConvertFrom-Json -DateKind String
+    $inspection = ConvertFrom-JsonExactStrings $result.StdOut
     Assert ($inspection.isStale -eq $true -and $inspection.ownerId -ceq $ownerA -and $inspection.threadId -ceq $threadA) "stale lock inspection did not preserve owner evidence"
     Assert (([Convert]::ToBase64String($staleBeforeInspect)) -ceq ([Convert]::ToBase64String([IO.File]::ReadAllBytes($lockPath)))) "stale inspect changed the lock file"
     $result = Invoke-Engine @("bootstrap-lock-inspect", "-Target", $root, "-ProjectId", "project-bootstrap-9999")
@@ -148,15 +157,15 @@ try {
     $orphan = Get-Content -Raw -Encoding UTF8 $orphanLockPath | ConvertFrom-Json
     $orphan.createdAt = "2026-01-01T00:00:00.0000000Z"; $orphan.renewedAt = "2026-01-01T00:00:01.0000000Z"; $orphan.expiresAt = "2026-01-01T00:00:02.0000000Z"
     Write-Utf8 $orphanLockPath (($orphan | ConvertTo-Json -Depth 10) + "`n")
-    $orphanInspect = (Invoke-Engine @("bootstrap-lock-inspect", "-Target", $orphanRoot, "-ProjectId", $project)).StdOut | ConvertFrom-Json -DateKind String
+    $orphanInspect = ConvertFrom-JsonExactStrings (Invoke-Engine @("bootstrap-lock-inspect", "-Target", $orphanRoot, "-ProjectId", $project)).StdOut
     $result = Invoke-Engine @("bootstrap-lock-recover", "-Target", $orphanRoot, "-ProjectId", $project, "-OwnerId", $ownerB, "-Phase", "installing", "-ExpectedOwnerId", $ownerA, "-ExpectedRenewedAt", $orphanInspect.renewedAt, "-ConfirmedOwnerInactive")
     Assert ($result.ExitCode -ne 0) "zero-candidate recovery omitted orphan confirmation"
     $orphan.phase = "creating"; Write-Utf8 $orphanLockPath (($orphan | ConvertTo-Json -Depth 10) + "`n")
-    $wrongPhaseInspect = (Invoke-Engine @("bootstrap-lock-inspect", "-Target", $orphanRoot, "-ProjectId", $project)).StdOut | ConvertFrom-Json -DateKind String
+    $wrongPhaseInspect = ConvertFrom-JsonExactStrings (Invoke-Engine @("bootstrap-lock-inspect", "-Target", $orphanRoot, "-ProjectId", $project)).StdOut
     $result = Invoke-Engine @("bootstrap-lock-recover", "-Target", $orphanRoot, "-ProjectId", $project, "-OwnerId", $ownerB, "-Phase", "installing", "-ExpectedOwnerId", $ownerA, "-ExpectedRenewedAt", $wrongPhaseInspect.renewedAt, "-ConfirmedOrphanedClaim")
     Assert ($result.ExitCode -ne 0) "non-install stale lock used orphan recovery"
     $orphan.phase = "installing"; Write-Utf8 $orphanLockPath (($orphan | ConvertTo-Json -Depth 10) + "`n")
-    $orphanInspect = (Invoke-Engine @("bootstrap-lock-inspect", "-Target", $orphanRoot, "-ProjectId", $project)).StdOut | ConvertFrom-Json -DateKind String
+    $orphanInspect = ConvertFrom-JsonExactStrings (Invoke-Engine @("bootstrap-lock-inspect", "-Target", $orphanRoot, "-ProjectId", $project)).StdOut
     $result = Invoke-Engine @("bootstrap-lock-recover", "-Target", $orphanRoot, "-ProjectId", $project, "-OwnerId", $ownerB, "-Phase", "orphan-recovery", "-ExpectedOwnerId", $ownerA, "-ExpectedRenewedAt", $orphanInspect.renewedAt, "-ConfirmedOrphanedClaim")
     Assert ($result.ExitCode -ne 0) "orphan recovery accepted a non-recoverable new phase"
     $result = Invoke-Engine @("bootstrap-lock-recover", "-Target", $orphanRoot, "-ProjectId", $project, "-OwnerId", $ownerB, "-Phase", "installing", "-ExpectedOwnerId", $ownerA, "-ExpectedRenewedAt", $orphanInspect.renewedAt, "-ConfirmedOrphanedClaim")
@@ -165,7 +174,7 @@ try {
     $orphan = Get-Content -Raw -Encoding UTF8 $orphanLockPath | ConvertFrom-Json
     $orphan.createdAt = "2026-01-01T00:00:00.0000000Z"; $orphan.renewedAt = "2026-01-01T00:00:03.0000000Z"; $orphan.expiresAt = "2026-01-01T00:00:04.0000000Z"
     Write-Utf8 $orphanLockPath (($orphan | ConvertTo-Json -Depth 10) + "`n")
-    $secondOrphanInspect = (Invoke-Engine @("bootstrap-lock-inspect", "-Target", $orphanRoot, "-ProjectId", $project)).StdOut | ConvertFrom-Json -DateKind String
+    $secondOrphanInspect = ConvertFrom-JsonExactStrings (Invoke-Engine @("bootstrap-lock-inspect", "-Target", $orphanRoot, "-ProjectId", $project)).StdOut
     $result = Invoke-Engine @("bootstrap-lock-recover", "-Target", $orphanRoot, "-ProjectId", $project, "-OwnerId", $ownerC, "-Phase", "installing", "-ExpectedOwnerId", $ownerB, "-ExpectedRenewedAt", $secondOrphanInspect.renewedAt, "-ConfirmedOrphanedClaim")
     $recoveredAgain = $result.StdOut | ConvertFrom-Json
     Assert ($result.ExitCode -eq 0 -and $recoveredAgain.ownerId -ceq $ownerC -and $null -eq $recoveredAgain.threadId -and $recoveredAgain.phase -ceq "installing") "interrupted orphan title claim could not be recovered a second time"

@@ -1,0 +1,157 @@
+{
+  "schema_version": 12,
+  "project": { "name": "<PROJECT_NAME>" },
+  "paths": {
+    "project_plan": "docs/PROJECT_PLAN.md",
+    "project_state": "docs/PROJECT_STATE.md",
+    "project_memory": ".agents/skills/project-workflow-manager/scripts/project-memory.py",
+    "workflow_protocol": ".agents/WORKFLOW_PROTOCOL.md"
+  },
+  "tasks": {
+    "max_active": 5,
+    "hub_occupies_slot": false,
+    "blocked_waiting_queued_occupy_slot": true,
+    "visible_execution_required": true,
+    "hidden_subagents_may_substitute": false,
+    "management_failure": "stop",
+    "request_key": "[codex-project-flow:request:v1] projectId=<exactProjectId>; hubThreadId=<exactHubThreadId>; requestId=<exactRequestId>; generation=1"
+  },
+  "requests": {
+    "request_id_assignment": "hub_before_first_work_output",
+    "states": ["awaiting_authorization", "queued", "active", "awaiting_acceptance", "revision_pending", "accepted_archived", "paused_archived", "continued_archived"],
+    "initial_state": "awaiting_authorization",
+    "confirmation_fields": ["understanding", "execution_items"],
+    "completion_fields": ["changes", "verification", "uncovered", "risk"],
+    "initial_owner": "hub",
+    "handoff_boundary": "exact_or_queued_execution_task_identity_established",
+    "post_handoff_owner": "execution_task",
+    "hub_post_handoff": "no_participation_for_same_request",
+    "execution_task_binding": "one_current_visible_task_per_request_with_authorized_successor",
+    "acceptance_owner": "execution_task",
+    "acceptance_archive": "sync_explicitly_mapped_step_or_state_only_then_exact_self_archive_without_next_step",
+    "rejection_route": "execution_task_reconfirm_in_place",
+    "scope_change_route": "execution_task_reconfirm_in_place",
+    "awaiting_acceptance_occupies_slot": true
+  },
+  "execution": {
+    "same_task_actions": ["inspect", "modify", "build", "test", "self_check", "evidence", "documentation", "commit", "push", "external"],
+    "supplemental_authorization": "continue_original_task",
+    "different_goal": "parallel_when_disjoint_and_slot_available_else_queue",
+    "scope_change": "pause_for_execution_task_confirmation_then_continue_original_task",
+    "replacement": "explicit_user_authorization",
+    "serial": ["same_request", "overlapping_paths", "upgrade_file_transaction"]
+  },
+  "documents": {
+    "default_extension": ".md",
+    "standalone_cover": false,
+    "first_heading": "#",
+    "heading_progression": "no_skipped_levels",
+    "body_structures": ["paragraphs", "lists", "tables", "code_blocks"],
+    "validation_scope": "created_or_updated_delivery_documents"
+  },
+  "project_memory": {
+    "startup_read": ["project_plan", "project_state"],
+    "plan_sections": ["目标", "总体进度", "任务步骤"],
+    "step_format": "- [ ] S01 | 步骤内容",
+    "step_completion": "explicit_user_acceptance_only",
+    "progress": "accepted_steps_over_total_steps",
+    "plan_changes": "user_confirms_goal_and_steps_not_per_file_drafts",
+    "state_content": ["goal_context", "current_step", "decisions", "work_and_results", "verification", "blockers", "pending_acceptance", "unfinished_work", "next_actions", "continuation_identity"],
+    "save_triggers": ["meaningful_progress", "user_acceptance", "before_archive", "before_successor"],
+    "routine_sync": "authorized_by_workflow_within_confirmed_scope",
+    "write_failure": "stop_before_archive_or_creation",
+    "historical_verification": "reread_and_reverify_in_successor"
+  },
+  "planning": {
+    "role": "separate_user_visible_planning_chat",
+    "automatic_on_bootstrap": true,
+    "registry_path": ".project-flow/planning.json",
+    "creation": "durable_intent_then_one_create_and_bind_exact_or_queued_identity",
+    "unknown_creation": "recover_original_identity_never_recreate",
+    "plan_initial_status": "draft_until_user_confirmation",
+    "interview": "grilling_proactive_dependency_frontier_rounds",
+    "interview_rules": ".agents/WORKFLOW_PROTOCOL.md#grilling-主动访谈",
+    "interview_memory": "state_decisions_dependencies_unanswered_questions_next_frontier",
+    "interview_completion": "all_relevant_boundaries_settled_then_explicit_user_confirmation",
+    "continuation_request_id": "root_creation_token",
+    "continuation_key": "[codex-project-flow:planning-continuation:v1] projectId=<exactProjectId>; hubThreadId=<exactHubThreadId>; creationToken=<rootCreationToken>; predecessorThreadId=<exactPredecessorThreadId>; generation=<positiveInteger>; rotationToken=<exactRotationToken>",
+    "upgrade": "preserve_existing_plan_and_state_then_discuss_unknowns",
+    "key": "[codex-project-flow:planning:v1] projectId=<exactProjectId>; hubThreadId=<exactHubThreadId>; creationToken=<exactCreationToken>"
+  },
+  "bootstrap": {
+    "registry_path": ".project-flow/hub.json",
+    "lock_path": ".project-flow/bootstrap.lock",
+    "registry_schema": 1,
+    "lock_schema": 2,
+    "stale_after_seconds": 300,
+    "fast_path": "registry_targeted_read",
+    "recovery_path": "exhaustive_metadata_on_exception",
+    "title_identity": "saved_project_binding_plus_mutation_thread",
+    "unarchive": "only_when_explicitly_archived",
+    "lock_acquire": "atomic_create_new",
+    "lock_inspect": "validated_read_only",
+    "existing_lock": "inspect_then_recover_or_stop",
+    "lock_release": "owner_claim_and_replacement_retirement_confirmation",
+    "stale_recovery": "exact_token_cas_same_thread_or_install_orphan",
+    "claim_title": "[cpf-claim] <shortClaimId>",
+    "hub_replacement": {
+      "authorization": "explicit_current_task_replaces_exact_registry_hub",
+      "registry_token": "sha256_raw_bytes",
+      "prepare_command": "hub-replacement-prepare",
+      "commit_command": "hub-replacement-commit",
+      "pre_cas_authority": "exact_registry_old_hub",
+      "post_cas_authority": "exact_registry_new_hub",
+      "old_hub_state": "accessible_and_inactive",
+      "new_hub_state": "current_task_exact_id",
+      "ordinary_task_create": false,
+      "retirement_order": ["versioned_retired_title", "unpin", "archive"],
+      "recovery": "registry_authority_plus_lock_evidence",
+      "third_hub": "forbidden",
+      "key": "[codex-project-flow:hub-replacement:v1] projectId=<exactProjectId>; expectedOldHubThreadId=<exactOldHubThreadId>; newHubThreadId=<exactCurrentThreadId>; expectedRegistryToken=<exactRegistryToken>; ownerId=<exactOwnerId>"
+    }
+  },
+  "rotation": {
+    "mode": "manual_natural_language_continue_or_pause",
+    "context_threshold": null,
+    "ambiguous_archive": "save_then_ask_continue_or_pause_without_archiving",
+    "pause": "save_then_archive_without_successor_or_acceptance",
+    "continue": "save_then_create_gated_successor_then_archive_predecessor",
+    "next_step": "explicit_user_request_only",
+    "ui_archive_hook": false,
+    "successor_gate": "wait_for_matching_predecessor_archive_before_work",
+    "capacity": "reserve_one_slot_before_create_never_exceed_max_active",
+    "key": "[codex-project-flow:execution:v3] projectId=<exactProjectId>; hubThreadId=<exactHubThreadId>; requestId=<exactRequestId>; predecessorThreadId=<exactPredecessorThreadId>; generation=<positiveInteger>"
+  },
+  "upgrade": {
+    "protocol": 4,
+    "transaction_task_role": "visible_coordinator_executor",
+    "post_handoff_owner": "transaction_task",
+    "barrier_owner": "transaction_task",
+    "request_key": "[codex-project-flow:upgrade-request:v1] projectId=<exactProjectId>; hubThreadId=<exactHubThreadId>; requestId=<exactRequestId>; mode=<exactMode>; sourceVersion=<exactSourceVersion>; targetVersion=<exactTargetVersion>",
+    "discovery": {
+      "listing": "exhaustive_metadata",
+      "history": "targeted",
+      "fallback": "full_on_ambiguity"
+    },
+    "zero_active_fast_path": true,
+    "reconcile": {
+      "active_snapshot": "empty_required_before_file_transaction_fail_closed"
+    },
+    "barrier": {
+      "creation_gate": "hub_exhaustive_check_blocks_on_provisional_and_active_before_every_creation",
+      "provisional": "[codex-project-flow:upgrade-barrier:v1] state=provisional; projectId=<exactProjectId>; mode=<exactMode>; sourceVersion=<exactSourceVersion>; targetVersion=<exactTargetVersion>; claimId=<exactClaimId>",
+      "active": "[codex-project-flow:upgrade-barrier:v1] state=active; projectId=<exactProjectId>; coordinatorThreadId=<exactCoordinatorThreadId>; sourceVersion=<exactSourceVersion>; targetVersion=<exactTargetVersion>; generation=<positiveInteger>",
+      "released": "[codex-project-flow:upgrade-barrier:v1] state=released; projectId=<exactProjectId>; coordinatorThreadId=<exactCoordinatorThreadId>; sourceVersion=<exactSourceVersion>; targetVersion=<exactTargetVersion>; generation=<positiveInteger>",
+      "cancelled": "[codex-project-flow:upgrade-barrier:v1] state=cancelled; projectId=<exactProjectId>; mode=<exactMode>; sourceVersion=<exactSourceVersion>; targetVersion=<exactTargetVersion>; claimId=<exactClaimId>"
+    },
+    "coordinator_claim": "[codex-project-flow:upgrade-claim:v2] projectId=<exactProjectId>; requestId=<exactRequestId>; coordinatorThreadId=<exactCoordinatorThreadId>; targetVersion=<exactTargetVersion>; claimId=<exactClaimId>",
+    "transaction_key": "[codex-project-flow:upgrade:v1] projectId=<exactProjectId>; coordinatorThreadId=<exactCoordinatorThreadId>; sourceVersion=<exactSourceVersion>; targetVersion=<exactTargetVersion>; generation=<positiveInteger>",
+    "observe": {
+      "poll_scan_latest_turns": 3,
+      "include_outputs": false,
+      "stable_terminal_snapshots": 3,
+      "poll_delays_seconds": [1, 2]
+    },
+    "attempt_deadline_seconds": 60
+  }
+}

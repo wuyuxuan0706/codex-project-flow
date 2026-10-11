@@ -709,11 +709,29 @@ def checked_entries(raw_entries, label, current=False):
             plugin_input(source, "managed source")
         entries.append(dict(raw, path=relative, source=source))
     if current:
+        required_paths = [
+            "AGENTS.md",
+            ".agents/workflow.json",
+            ".agents/WORKFLOW_PROTOCOL.md",
+            ".agents/skills/project-workflow-manager/SKILL.md",
+            ".agents/skills/project-workflow-manager/agents/openai.yaml",
+            "docs/PROJECT_STATE.md",
+            "docs/PROJECT_PLAN.md",
+            ".agents/skills/project-workflow-manager/scripts/project-memory.py",
+        ]
+        if [item["path"] for item in entries] != required_paths:
+            fail("managed-files.json must contain exactly the eight expected managed paths")
         by_path = {item["path"]: item for item in entries}
+        plan = by_path.get("docs/PROJECT_PLAN.md", {})
         state = by_path.get("docs/PROJECT_STATE.md", {})
+        memory = by_path.get(".agents/skills/project-workflow-manager/scripts/project-memory.py", {})
         agents = by_path.get("AGENTS.md", {})
+        if (plan.get("policy"), plan.get("ownership"), plan.get("conflict_resolution")) != ("seed_once", "project", "preserve"):
+            fail("docs/PROJECT_PLAN.md must be project-owned and preserved")
         if (state.get("policy"), state.get("ownership"), state.get("conflict_resolution")) != ("seed_once", "project", "preserve"):
             fail("docs/PROJECT_STATE.md must be project-owned and preserved")
+        if (memory.get("policy"), memory.get("ownership"), memory.get("conflict_resolution")) != ("replace_if_unmodified", "plugin", "upstream_wins"):
+            fail("project-memory.py must be plugin-owned and upstream-wins")
         if (agents.get("ownership"), agents.get("conflict_resolution"), agents.get("preserve_sections")) != ("mixed", "preserve_markdown_sections", ["项目事实"]):
             fail("AGENTS.md must preserve the 项目事实 project-content section")
     return entries
@@ -793,8 +811,18 @@ def validate_installation(target, allow_placeholders=False, quiet=False, runtime
     if plugin_version != version and not plugin_version.startswith(version + "+codex."):
         fail("Plugin version does not match VERSION", 1)
     expected_paths = [item["path"] for item in entries]
-    if len(expected_paths) != 6 or len(set(expected_paths)) != 6:
-        fail("Current contract must contain exactly six managed files", 1)
+    required_paths = [
+        "AGENTS.md",
+        ".agents/workflow.json",
+        ".agents/WORKFLOW_PROTOCOL.md",
+        ".agents/skills/project-workflow-manager/SKILL.md",
+        ".agents/skills/project-workflow-manager/agents/openai.yaml",
+        "docs/PROJECT_STATE.md",
+        "docs/PROJECT_PLAN.md",
+        ".agents/skills/project-workflow-manager/scripts/project-memory.py",
+    ]
+    if expected_paths != required_paths or len(set(expected_paths)) != 8:
+        fail("Current contract must contain exactly the eight expected managed files", 1)
 
     retired_paths = set(managed["retired_paths"])
     historical = set()
@@ -825,7 +853,7 @@ def validate_installation(target, allow_placeholders=False, quiet=False, runtime
 
     workflow_path = target.path(".agents/workflow.json")
     workflow = load_json(workflow_path, ".agents/workflow.json")
-    if set(workflow) != {"schema_version", "project", "paths", "tasks", "requests", "execution", "documents", "bootstrap", "rotation", "upgrade"}:
+    if set(workflow) != {"schema_version", "project", "paths", "tasks", "requests", "execution", "documents", "project_memory", "planning", "bootstrap", "rotation", "upgrade"}:
         fail("workflow fields are invalid", 1)
     project = workflow.get("project")
     if not isinstance(project, dict) or set(project) != {"name"}:
@@ -837,14 +865,16 @@ def validate_installation(target, allow_placeholders=False, quiet=False, runtime
     if project_name == "<PROJECT_NAME>" and not allow_placeholders:
         fail("workflow project placeholder was not rendered", 1)
     expected_fields = {
-        "paths": {"project_state", "workflow_protocol"},
-        "tasks": {"max_active", "hub_occupies_slot", "blocked_waiting_queued_occupy_slot", "visible_execution_required", "hidden_subagents_may_substitute", "management_failure", "request_key"},
+        "paths": {"project_plan", "project_state", "project_memory", "workflow_protocol"},
+        "tasks": {"max_active", "hub_occupies_slot", "blocked_waiting_queued_occupy_slot", "visible_execution_required", "hidden_subagents_may_substitute", "management_failure", "request_key", "model_policy", "creation_omit_fields", "hidden_agents_omit_fields"},
         "requests": {"request_id_assignment", "states", "initial_state", "confirmation_fields", "completion_fields", "initial_owner", "handoff_boundary", "post_handoff_owner", "hub_post_handoff", "execution_task_binding", "acceptance_owner", "acceptance_archive", "rejection_route", "scope_change_route", "awaiting_acceptance_occupies_slot"},
         "execution": {"same_task_actions", "supplemental_authorization", "different_goal", "scope_change", "replacement", "serial"},
-        "documents": {"default_extension", "standalone_cover", "first_heading", "heading_progression", "body_structures", "validation_scope", "review"},
+        "documents": {"default_extension", "standalone_cover", "first_heading", "heading_progression", "body_structures", "validation_scope"},
+        "project_memory": {"startup_read", "plan_sections", "step_format", "step_completion", "progress", "plan_changes", "state_content", "save_triggers", "routine_sync", "write_failure", "historical_verification"},
+        "planning": {"role", "automatic_on_bootstrap", "registry_path", "creation", "unknown_creation", "plan_initial_status", "interview", "interview_rules", "interview_memory", "interview_completion", "continuation_request_id", "continuation_key", "upgrade", "key"},
         "bootstrap": {"registry_path", "lock_path", "registry_schema", "lock_schema", "stale_after_seconds", "fast_path", "recovery_path", "title_identity", "unarchive", "lock_acquire", "lock_inspect", "existing_lock", "lock_release", "stale_recovery", "claim_title", "hub_replacement"},
-        "rotation": {"mode", "key"},
-        "upgrade": {"protocol", "transaction_task_role", "post_handoff_owner", "barrier_owner", "request_key", "discovery", "zero_active_fast_path", "reconcile", "barrier", "coordinator_claim", "transaction_key", "observe", "attempt_deadline_seconds"},
+        "rotation": {"mode", "context_threshold", "ambiguous_archive", "pause", "continue", "next_step", "ui_archive_hook", "successor_gate", "capacity", "key"},
+        "upgrade": {"protocol", "transaction_task_role", "post_handoff_owner", "barrier_owner", "request_key", "discovery", "zero_active_fast_path", "reconcile", "barrier", "coordinator_claim", "transaction_key", "observe", "attempt_deadline_seconds", "hub_refresh"},
     }
     for section, expected in expected_fields.items():
         if not isinstance(workflow.get(section), dict) or set(workflow[section]) != expected:
@@ -857,17 +887,32 @@ def validate_installation(target, allow_placeholders=False, quiet=False, runtime
         fail("reconcile fields are invalid", 1)
     if not isinstance(workflow["upgrade"].get("barrier"), dict) or set(workflow["upgrade"]["barrier"]) != {"creation_gate", "provisional", "active", "released", "cancelled"}:
         fail("barrier fields are invalid", 1)
-    if not isinstance(workflow["documents"].get("review"), dict) or set(workflow["documents"]["review"]) != {"required", "scope", "draft_delivery", "states", "initial_state", "approval_owner", "approval_evidence", "write_authorization", "rejection", "post_write_change", "exceptions"}:
-        fail("document review fields are invalid", 1)
-    if not isinstance(workflow["documents"]["review"].get("exceptions"), dict) or set(workflow["documents"]["review"]["exceptions"]) != {"bootstrap_managed_markdown", "upgrade_managed_markdown", "non_deployment_markdown"}:
-        fail("document review exception fields are invalid", 1)
     if not isinstance(workflow["upgrade"].get("zero_active_fast_path"), bool):
         fail("zero active fast path must be boolean", 1)
     if not isinstance(workflow["bootstrap"].get("hub_replacement"), dict) or set(workflow["bootstrap"]["hub_replacement"]) != {"authorization", "registry_token", "prepare_command", "commit_command", "pre_cas_authority", "post_cas_authority", "old_hub_state", "new_hub_state", "ordinary_task_create", "retirement_order", "recovery", "third_hub", "key"}:
         fail("hub replacement fields are invalid", 1)
+    refresh_expected = {
+        "authorization": "apply_includes_one_exact_inactive_registered_hub_refresh",
+        "intent_path": ".project-flow/upgrade-hub.json",
+        "creation": "durable_intent_one_cold_start_hub_bind_or_recover_never_recreate",
+        "barrier_exception": "one_intent_bound_hub_only_dispatch_blocked_until_released",
+        "executor": "same_upgrade_task_not_promoted_hub",
+        "retirement": "verified_new_title_pin_registry_then_exact_old_title_unpin_archive",
+        "planning": "rebind_same_root_token_identity_and_lineage",
+        "completion": "verified_refresh_reconciliation_then_release_barrier",
+        "plan_and_rollback": "no_hub_refresh",
+        "key": "[codex-project-flow:upgrade-hub:v1] projectId=<exactProjectId>; upgradeThreadId=<exactUpgradeThreadId>; requestId=<exactRequestId>; claimId=<exactClaimId>; oldHubThreadId=<exactOldHubThreadId>; expectedRegistryToken=<exactRegistryToken>; targetVersion=<exactTargetVersion>; creationToken=<exactCreationToken>",
+    }
+    if workflow["upgrade"].get("hub_refresh") != refresh_expected:
+        fail("upgrade hub refresh contract is invalid", 1)
     checks = [
-        (workflow.get("schema_version"), 11, "workflow schema"),
+        (workflow["tasks"].get("model_policy"), "codex_default_no_overrides", "task model policy"),
+        (workflow["tasks"].get("creation_omit_fields"), ["model", "thinking"], "task model omission"),
+        (workflow["tasks"].get("hidden_agents_omit_fields"), ["model", "reasoning_effort"], "hidden agent model omission"),
+        (workflow.get("schema_version"), 13, "workflow schema"),
+        (workflow.get("paths", {}).get("project_plan"), "docs/PROJECT_PLAN.md", "project plan path"),
         (workflow.get("paths", {}).get("project_state"), "docs/PROJECT_STATE.md", "project state path"),
+        (workflow.get("paths", {}).get("project_memory"), ".agents/skills/project-workflow-manager/scripts/project-memory.py", "project memory path"),
         (workflow.get("paths", {}).get("workflow_protocol"), ".agents/WORKFLOW_PROTOCOL.md", "protocol path"),
         (workflow.get("tasks", {}).get("max_active"), 5, "active task limit"),
         (workflow.get("tasks", {}).get("hub_occupies_slot"), False, "hub slot"),
@@ -877,7 +922,7 @@ def validate_installation(target, allow_placeholders=False, quiet=False, runtime
         (workflow.get("tasks", {}).get("management_failure"), "stop", "management failure"),
         (workflow.get("tasks", {}).get("request_key"), "[codex-project-flow:request:v1] projectId=<exactProjectId>; hubThreadId=<exactHubThreadId>; requestId=<exactRequestId>; generation=1", "request key"),
         (workflow.get("requests", {}).get("request_id_assignment"), "hub_before_first_work_output", "request ID assignment"),
-        (workflow.get("requests", {}).get("states"), ["awaiting_authorization", "queued", "active", "awaiting_acceptance", "revision_pending", "accepted_archived"], "request states"),
+        (workflow.get("requests", {}).get("states"), ["awaiting_authorization", "queued", "active", "awaiting_acceptance", "revision_pending", "accepted_archived", "paused_archived", "continued_archived"], "request states"),
         (workflow.get("requests", {}).get("initial_state"), "awaiting_authorization", "request initial state"),
         (workflow.get("requests", {}).get("confirmation_fields"), ["understanding", "execution_items"], "request confirmation fields"),
         (workflow.get("requests", {}).get("completion_fields"), ["changes", "verification", "uncovered", "risk"], "request completion fields"),
@@ -885,9 +930,9 @@ def validate_installation(target, allow_placeholders=False, quiet=False, runtime
         (workflow.get("requests", {}).get("handoff_boundary"), "exact_or_queued_execution_task_identity_established", "request handoff boundary"),
         (workflow.get("requests", {}).get("post_handoff_owner"), "execution_task", "request post-handoff owner"),
         (workflow.get("requests", {}).get("hub_post_handoff"), "no_participation_for_same_request", "request hub post-handoff"),
-        (workflow.get("requests", {}).get("execution_task_binding"), "one_exact_visible_task_per_request", "request task binding"),
+        (workflow.get("requests", {}).get("execution_task_binding"), "one_current_visible_task_per_request_with_authorized_successor", "request task binding"),
         (workflow.get("requests", {}).get("acceptance_owner"), "execution_task", "request acceptance owner"),
-        (workflow.get("requests", {}).get("acceptance_archive"), "exact_self_archive_success_and_matching_archived_task_id_required", "request acceptance archive"),
+        (workflow.get("requests", {}).get("acceptance_archive"), "sync_explicitly_mapped_step_or_state_only_then_exact_self_archive_without_next_step", "request acceptance archive"),
         (workflow.get("requests", {}).get("rejection_route"), "execution_task_reconfirm_in_place", "request rejection route"),
         (workflow.get("requests", {}).get("scope_change_route"), "execution_task_reconfirm_in_place", "request scope-change route"),
         (workflow.get("requests", {}).get("awaiting_acceptance_occupies_slot"), True, "request acceptance slot"),
@@ -903,19 +948,31 @@ def validate_installation(target, allow_placeholders=False, quiet=False, runtime
         (workflow.get("documents", {}).get("heading_progression"), "no_skipped_levels", "document heading progression"),
         (workflow.get("documents", {}).get("body_structures"), ["paragraphs", "lists", "tables", "code_blocks"], "document body structures"),
         (workflow.get("documents", {}).get("validation_scope"), "created_or_updated_delivery_documents", "document validation scope"),
-        (workflow.get("documents", {}).get("review", {}).get("required"), True, "document review required"),
-        (workflow.get("documents", {}).get("review", {}).get("scope"), "all_new_or_modified_non_deployment_markdown_documents", "document review scope"),
-        (workflow.get("documents", {}).get("review", {}).get("draft_delivery"), "complete_plain_text_in_chat_before_write", "document review draft"),
-        (workflow.get("documents", {}).get("review", {}).get("states"), ["draft_pending_review", "approved_for_write", "revision_required", "written"], "document review states"),
-        (workflow.get("documents", {}).get("review", {}).get("initial_state"), "draft_pending_review", "document review initial state"),
-        (workflow.get("documents", {}).get("review", {}).get("approval_owner"), "user", "document review owner"),
-        (workflow.get("documents", {}).get("review", {}).get("approval_evidence"), "explicit_user_chat_approval_bound_to_exact_path_and_content_sha256", "document review evidence"),
-        (workflow.get("documents", {}).get("review", {}).get("write_authorization"), "approved_exact_content_only", "document review write authorization"),
-        (workflow.get("documents", {}).get("review", {}).get("rejection"), "revise_complete_draft_and_resubmit", "document review rejection"),
-        (workflow.get("documents", {}).get("review", {}).get("post_write_change"), "return_to_draft_pending_review", "document review post-write change"),
-        (workflow.get("documents", {}).get("review", {}).get("exceptions", {}).get("bootstrap_managed_markdown"), "no_draft_review_for_install_or_recovery", "bootstrap Markdown review exception"),
-        (workflow.get("documents", {}).get("review", {}).get("exceptions", {}).get("upgrade_managed_markdown"), "no_draft_review_for_apply_resume_or_rollback", "upgrade Markdown review exception"),
-        (workflow.get("documents", {}).get("review", {}).get("exceptions", {}).get("non_deployment_markdown"), "normal_review_required", "non-deployment Markdown review"),
+        (workflow.get("project_memory", {}).get("startup_read"), ["project_plan", "project_state"], "project memory startup read"),
+        (workflow.get("project_memory", {}).get("plan_sections"), ["目标", "总体进度", "任务步骤"], "project memory plan sections"),
+        (workflow.get("project_memory", {}).get("step_format"), "- [ ] S01 | 步骤内容", "project memory step format"),
+        (workflow.get("project_memory", {}).get("step_completion"), "explicit_user_acceptance_only", "project memory step completion"),
+        (workflow.get("project_memory", {}).get("progress"), "accepted_steps_over_total_steps", "project memory progress"),
+        (workflow.get("project_memory", {}).get("plan_changes"), "user_confirms_goal_and_steps_not_per_file_drafts", "project memory plan changes"),
+        (workflow.get("project_memory", {}).get("state_content"), ["goal_context", "current_step", "decisions", "work_and_results", "verification", "blockers", "pending_acceptance", "unfinished_work", "next_actions", "continuation_identity"], "project memory state content"),
+        (workflow.get("project_memory", {}).get("save_triggers"), ["meaningful_progress", "user_acceptance", "before_archive", "before_successor"], "project memory save triggers"),
+        (workflow.get("project_memory", {}).get("routine_sync"), "authorized_by_workflow_within_confirmed_scope", "project memory routine sync"),
+        (workflow.get("project_memory", {}).get("write_failure"), "stop_before_archive_or_creation", "project memory write failure"),
+        (workflow.get("project_memory", {}).get("historical_verification"), "reread_and_reverify_in_successor", "project memory historical verification"),
+        (workflow.get("planning", {}).get("role"), "separate_user_visible_planning_chat", "planning role"),
+        (workflow.get("planning", {}).get("automatic_on_bootstrap"), True, "planning automatic bootstrap"),
+        (workflow.get("planning", {}).get("registry_path"), ".project-flow/planning.json", "planning registry path"),
+        (workflow.get("planning", {}).get("creation"), "durable_intent_then_one_create_and_bind_exact_or_queued_identity", "planning creation"),
+        (workflow.get("planning", {}).get("unknown_creation"), "recover_original_identity_never_recreate", "planning unknown creation"),
+        (workflow.get("planning", {}).get("plan_initial_status"), "draft_until_user_confirmation", "planning initial status"),
+        (workflow.get("planning", {}).get("interview"), "grilling_proactive_dependency_frontier_rounds", "planning interview"),
+        (workflow.get("planning", {}).get("interview_rules"), ".agents/WORKFLOW_PROTOCOL.md#grilling-主动访谈", "planning interview rules"),
+        (workflow.get("planning", {}).get("interview_memory"), "state_decisions_dependencies_unanswered_questions_next_frontier", "planning interview memory"),
+        (workflow.get("planning", {}).get("interview_completion"), "all_relevant_boundaries_settled_then_explicit_user_confirmation", "planning interview completion"),
+        (workflow.get("planning", {}).get("continuation_request_id"), "root_creation_token", "planning continuation request id"),
+        (workflow.get("planning", {}).get("continuation_key"), "[codex-project-flow:planning-continuation:v1] projectId=<exactProjectId>; hubThreadId=<exactHubThreadId>; creationToken=<rootCreationToken>; predecessorThreadId=<exactPredecessorThreadId>; generation=<positiveInteger>; rotationToken=<exactRotationToken>", "planning continuation key"),
+        (workflow.get("planning", {}).get("upgrade"), "preserve_existing_plan_and_state_then_discuss_unknowns", "planning upgrade"),
+        (workflow.get("planning", {}).get("key"), "[codex-project-flow:planning:v1] projectId=<exactProjectId>; hubThreadId=<exactHubThreadId>; creationToken=<exactCreationToken>", "planning key"),
         (workflow.get("bootstrap", {}).get("registry_path"), ".project-flow/hub.json", "bootstrap registry path"),
         (workflow.get("bootstrap", {}).get("lock_path"), ".project-flow/bootstrap.lock", "bootstrap lock path"),
         (workflow.get("bootstrap", {}).get("registry_schema"), 1, "bootstrap registry schema"),
@@ -944,7 +1001,15 @@ def validate_installation(target, allow_placeholders=False, quiet=False, runtime
         (workflow.get("bootstrap", {}).get("hub_replacement", {}).get("recovery"), "registry_authority_plus_lock_evidence", "hub replacement recovery"),
         (workflow.get("bootstrap", {}).get("hub_replacement", {}).get("third_hub"), "forbidden", "hub replacement third hub"),
         (workflow.get("bootstrap", {}).get("hub_replacement", {}).get("key"), "[codex-project-flow:hub-replacement:v1] projectId=<exactProjectId>; expectedOldHubThreadId=<exactOldHubThreadId>; newHubThreadId=<exactCurrentThreadId>; expectedRegistryToken=<exactRegistryToken>; ownerId=<exactOwnerId>", "hub replacement key"),
-        (workflow.get("rotation", {}).get("mode"), "explicit_user_authorization_only", "rotation mode"),
+        (workflow.get("rotation", {}).get("mode"), "manual_natural_language_continue_or_pause", "rotation mode"),
+        (workflow.get("rotation", {}).get("context_threshold"), None, "rotation context threshold"),
+        (workflow.get("rotation", {}).get("ambiguous_archive"), "save_then_ask_continue_or_pause_without_archiving", "rotation ambiguous archive"),
+        (workflow.get("rotation", {}).get("pause"), "save_then_archive_without_successor_or_acceptance", "rotation pause"),
+        (workflow.get("rotation", {}).get("continue"), "save_then_create_gated_successor_then_archive_predecessor", "rotation continue"),
+        (workflow.get("rotation", {}).get("next_step"), "explicit_user_request_only", "rotation next step"),
+        (workflow.get("rotation", {}).get("ui_archive_hook"), False, "rotation UI archive hook"),
+        (workflow.get("rotation", {}).get("successor_gate"), "wait_for_matching_predecessor_archive_before_work", "rotation successor gate"),
+        (workflow.get("rotation", {}).get("capacity"), "reserve_one_slot_before_create_never_exceed_max_active", "rotation capacity"),
         (workflow.get("rotation", {}).get("key"), "[codex-project-flow:execution:v3] projectId=<exactProjectId>; hubThreadId=<exactHubThreadId>; requestId=<exactRequestId>; predecessorThreadId=<exactPredecessorThreadId>; generation=<positiveInteger>", "rotation key"),
         (workflow.get("upgrade", {}).get("protocol"), 4, "upgrade protocol"),
         (workflow.get("upgrade", {}).get("transaction_task_role"), "visible_coordinator_executor", "transaction task role"),
@@ -981,10 +1046,11 @@ def validate_installation(target, allow_placeholders=False, quiet=False, runtime
             "upgrade-project-flow/agents/openai.yaml",
             "upgrade-project-flow/references/coordination.md",
             "upgrade-project-flow/references/file-transaction.md",
+            "upgrade-project-flow/references/hub-refresh.md",
         ])
         actual_skills = sorted(path.relative_to(PLUGIN_ROOT / "skills").as_posix() for path in (PLUGIN_ROOT / "skills").rglob("*") if path.is_file())
         if actual_skills != expected_skills:
-            fail("Plugin must contain exactly the six expected Skill files", 1)
+            fail("Plugin must contain exactly the seven expected Skill files", 1)
 
         conflict_pattern = re.compile(r'任务管理(能力)?不可用时.{0,20}(回到|回退到)中枢|continue_in_hub|hub_execution_allowed|"hidden_subagents"\s*:\s*"may_substitute"', re.DOTALL)
         for relative in ("AGENTS.md", ".agents", "docs"):
@@ -1001,7 +1067,7 @@ def validate_installation(target, allow_placeholders=False, quiet=False, runtime
         if entry["path"].endswith(".md"):
             validate_markdown(live, entry["path"])
     if not runtime:
-        for relative in ("README.md", "docs/TEST_CASES.md", "templates/PROJECT_STATE.md", "skills/bootstrap-project-flow/SKILL.md", "skills/upgrade-project-flow/SKILL.md", "skills/upgrade-project-flow/references/coordination.md", "skills/upgrade-project-flow/references/file-transaction.md"):
+        for relative in ("README.md", "docs/TEST_CASES.md", "templates/PROJECT_PLAN.md", "templates/PROJECT_STATE.md", "skills/bootstrap-project-flow/SKILL.md", "skills/upgrade-project-flow/SKILL.md", "skills/upgrade-project-flow/references/coordination.md", "skills/upgrade-project-flow/references/file-transaction.md"):
             validate_markdown(plugin_input(relative, "delivery Markdown"), relative)
     for relative in retired_paths:
         if target.path(relative).exists():
@@ -1412,10 +1478,10 @@ class Upgrade:
             applied = live_text
             if live_text is None:
                 action, applied = "CREATE", new_text
-            elif base_text is None:
-                action = "NOOP" if live_hash == new_hash else "CONFLICT"
             elif entry["policy"] == "seed_once":
                 action = "NOOP" if live_hash == new_hash else "PRESERVE"
+            elif base_text is None:
+                action = "NOOP" if live_hash == new_hash else "CONFLICT"
             elif live_hash == new_hash:
                 action = "NOOP"
             elif live_hash == base_hash:

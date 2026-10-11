@@ -1,4 +1,4 @@
 interface:
-  display_name: "项目工作流状态维护"
-  short_description: "根据已确认事实维护项目的当前目标、进展、重要结论与下一步"
-  default_prompt: "使用 $project-workflow-manager 根据已确认事实更新项目长期状态。"
+  display_name: "项目本地记忆"
+  short_description: "读取计划与状态，保存重要进展、明确验收和换聊天续接信息"
+  default_prompt: "使用 $project-workflow-manager 读取项目计划与状态，并保存当前任务的重要进展和续接信息。"

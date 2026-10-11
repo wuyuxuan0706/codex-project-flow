@@ -1,0 +1,4 @@
+interface:
+  display_name: "项目工作流状态维护"
+  short_description: "根据已确认事实维护项目的当前目标、进展、重要结论与下一步"
+  default_prompt: "使用 $project-workflow-manager 根据已确认事实更新项目长期状态。"
