@@ -1,0 +1,39 @@
+name: Regression tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+      PYTHONUTF8: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Native Windows regression
+        shell: pwsh
+        run: ./tests/test.ps1
+      - name: PowerShell and Git Bash interoperability
+        shell: pwsh
+        run: ./tests/test-parity.ps1 -BaselineVersion 0.14.0 -RequirePosix
+
+  posix:
+    runs-on: ubuntu-latest
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: POSIX regression
+        run: sh tests/test.sh

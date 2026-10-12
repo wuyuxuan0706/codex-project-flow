@@ -60,6 +60,11 @@ def digest(data):
     return "sha256:" + hashlib.sha256(data).hexdigest()
 
 
+def write_utf8(path, text):
+    # Fixtures and their CAS expectations must describe identical bytes on every OS.
+    path.write_bytes(text.encode("utf-8"))
+
+
 class ProjectFixture:
     def __init__(self, base: Path):
         self.root = (base / "project").resolve()
@@ -81,13 +86,11 @@ class ProjectFixture:
             },
             "planning": {"registry_path": ".project-flow/planning.json"},
         }
-        (self.root / ".agents/workflow.json").write_text(
-            json.dumps(workflow, ensure_ascii=False), encoding="utf-8"
-        )
+        write_utf8(self.root / ".agents/workflow.json", json.dumps(workflow, ensure_ascii=False))
         self.plan = self.root / "docs/PROJECT_PLAN.md"
         self.state = self.root / "docs/PROJECT_STATE.md"
-        self.plan.write_text(PLAN, encoding="utf-8")
-        self.state.write_text(LEGACY_STATE, encoding="utf-8")
+        write_utf8(self.plan, PLAN)
+        write_utf8(self.state, LEGACY_STATE)
         hub = {
             "schemaVersion": 1,
             "projectId": self.project_id,
@@ -96,16 +99,14 @@ class ProjectFixture:
             "hubTitle": "Project hub",
             "updatedAt": "2026-10-09T00:00:00.000000Z",
         }
-        (self.root / ".project-flow/hub.json").write_text(
-            json.dumps(hub), encoding="utf-8"
-        )
+        write_utf8(self.root / ".project-flow/hub.json", json.dumps(hub))
 
     def replace_hub(self, thread_id):
         path = self.root / ".project-flow/hub.json"
         hub = json.loads(path.read_text(encoding="utf-8"))
         hub["threadId"] = thread_id
         hub["updatedAt"] = "2026-10-09T01:00:00.000000Z"
-        path.write_text(json.dumps(hub), encoding="utf-8")
+        write_utf8(path, json.dumps(hub))
 
     def command(self, *arguments):
         return subprocess.run(
@@ -126,24 +127,28 @@ class ProjectMemoryTests(unittest.TestCase):
         self.temporary.cleanup()
 
     def test_read_returns_both_documents_hashes_and_empty_planning(self):
-        result = self.fixture.command("read", "--project", str(self.fixture.root))
-        self.assertEqual(result.returncode, 0, result.stderr)
-        value = json.loads(result.stdout)
-        self.assertEqual(value["plan"]["content"], PLAN)
-        self.assertEqual(value["plan"]["sha256"], digest(PLAN))
-        self.assertEqual(value["state"]["content"], LEGACY_STATE)
-        self.assertEqual(value["state"]["sha256"], digest(LEGACY_STATE))
-        self.assertIsNone(value["planning"])
-        self.assertFalse(value["planningStatus"]["bindingMismatch"])
+        for newline in ("\n", "\r\n"):
+            with self.subTest(newline=repr(newline)):
+                write_utf8(self.fixture.plan, PLAN.replace("\n", newline))
+                write_utf8(self.fixture.state, LEGACY_STATE.replace("\n", newline))
+                result = self.fixture.command("read", "--project", str(self.fixture.root))
+                self.assertEqual(result.returncode, 0, result.stderr)
+                value = json.loads(result.stdout)
+                for field, path in (("plan", self.fixture.plan), ("state", self.fixture.state)):
+                    raw = path.read_bytes()
+                    self.assertEqual(value[field]["content"], raw.decode("utf-8"))
+                    self.assertEqual(value[field]["sha256"], digest(raw))
+                self.assertIsNone(value["planning"])
+                self.assertFalse(value["planningStatus"]["bindingMismatch"])
 
     def test_real_project_plan_template_is_readable_after_install(self):
         template = (ROOT / "templates/PROJECT_PLAN.md").read_text(encoding="utf-8")
-        self.fixture.plan.write_text(template, encoding="utf-8")
+        write_utf8(self.fixture.plan, template)
         result = self.fixture.command("read", "--project", str(self.fixture.root))
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(result.stdout)["plan"]["content"], template)
 
-        self.fixture.plan.write_text(template + "\n## 额外章节\n\n- 非规范内容。\n", encoding="utf-8")
+        write_utf8(self.fixture.plan, template + "\n## 额外章节\n\n- 非规范内容。\n")
         unsupported = self.fixture.command("read", "--project", str(self.fixture.root))
         self.assertEqual(unsupported.returncode, 0, unsupported.stderr)
         self.assertFalse(json.loads(unsupported.stdout)["planFormatSupported"])
@@ -170,18 +175,18 @@ class ProjectMemoryTests(unittest.TestCase):
             with self.subTest(section=section, key=key, path=bad_path):
                 changed = json.loads(json.dumps(original))
                 changed[section][key] = bad_path
-                workflow_path.write_text(json.dumps(changed), encoding="utf-8")
+                write_utf8(workflow_path, json.dumps(changed))
                 result = self.fixture.command("read", "--project", str(self.fixture.root))
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn("must be exactly", result.stderr)
                 self.assertEqual(self.fixture.plan.read_bytes(), plan_before)
                 self.assertEqual(self.fixture.state.read_bytes(), state_before)
-        workflow_path.write_text(json.dumps(original), encoding="utf-8")
+        write_utf8(workflow_path, json.dumps(original))
 
     def test_save_is_state_only_cas_and_acceptance_is_not_claimed_authenticated(self):
         replacement = LEGACY_STATE.replace("尚未开始", "S01 已完成，等待验收")
         source = Path(self.temporary.name).resolve() / "new-state.md"
-        source.write_text(replacement, encoding="utf-8")
+        write_utf8(source, replacement)
         result = self.fixture.command(
             "save", "--project", str(self.fixture.root), "--state-file", str(source),
             "--expected-state", digest(LEGACY_STATE),
@@ -245,7 +250,7 @@ class ProjectMemoryTests(unittest.TestCase):
             "## 阻塞与待验收\n\n- S01 待验收。\n- S02 仍被外部条件阻塞。\n\n"
             "## 下一步\n\n- 等待 S01 验收。",
         )
-        self.fixture.state.write_text(state, encoding="utf-8")
+        write_utf8(self.fixture.state, state)
         accepted = self.fixture.command(
             "accept", "--project", str(self.fixture.root), "--step", "S01",
             "--user-acceptance", "S01 已明确验收。", "--expected-plan", digest(PLAN),
@@ -259,7 +264,7 @@ class ProjectMemoryTests(unittest.TestCase):
             "- 等待 S01 验收。", "- 继续处理 S02 阻塞。"
         )
         state_input = Path(self.temporary.name).resolve() / "post-accept-state.md"
-        state_input.write_text(cleaned, encoding="utf-8")
+        write_utf8(state_input, cleaned)
         saved = self.fixture.command(
             "save", "--project", str(self.fixture.root), "--state-file", str(state_input),
             "--expected-state", value["state"]["sha256"],
@@ -297,7 +302,7 @@ class ProjectMemoryTests(unittest.TestCase):
         self.assertEqual(self.fixture.state.read_bytes(), before_state)
 
         malformed = PLAN.replace("- [ ] S01 | 完成第一步", "- [maybe] S01 | 完成第一步")
-        self.fixture.plan.write_text(malformed, encoding="utf-8")
+        write_utf8(self.fixture.plan, malformed)
         malformed_before = self.fixture.plan.read_bytes()
         invalid = self.fixture.command(
             "accept", "--project", str(self.fixture.root), "--step", "S01",
@@ -311,7 +316,7 @@ class ProjectMemoryTests(unittest.TestCase):
 
     def test_invalid_state_save_has_zero_writes(self):
         bad = Path(self.temporary.name).resolve() / "bad.md"
-        bad.write_text("not a project state\n", encoding="utf-8")
+        write_utf8(bad, "not a project state\n")
         before = self.fixture.state.read_bytes()
         result = self.fixture.command(
             "save", "--project", str(self.fixture.root), "--state-file", str(bad),
@@ -323,9 +328,14 @@ class ProjectMemoryTests(unittest.TestCase):
     @unittest.skipUnless(hasattr(Path, "symlink_to"), "symbolic links unavailable")
     def test_symlink_target_and_project_alias_are_rejected(self):
         outside = Path(self.temporary.name) / "outside.md"
-        outside.write_text("outside", encoding="utf-8")
+        write_utf8(outside, "outside")
         self.fixture.state.unlink()
-        self.fixture.state.symlink_to(outside)
+        try:
+            self.fixture.state.symlink_to(outside)
+        except OSError as error:
+            if getattr(error, "winerror", None) == 1314:
+                self.skipTest("Windows symbolic-link creation requires an unavailable privilege")
+            raise
         result = self.fixture.command("read", "--project", str(self.fixture.root))
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("symbolic link or reparse point", result.stderr)
@@ -339,11 +349,11 @@ class ProjectMemoryTests(unittest.TestCase):
 
         # A caller-supplied draft cannot enter through a linked parent either.
         self.fixture.state.unlink()
-        self.fixture.state.write_text(LEGACY_STATE, encoding="utf-8")
+        write_utf8(self.fixture.state, LEGACY_STATE)
         real_drafts = Path(self.temporary.name).resolve() / "real-drafts"
         real_drafts.mkdir()
         draft = real_drafts / "state.md"
-        draft.write_text(LEGACY_STATE, encoding="utf-8")
+        write_utf8(draft, LEGACY_STATE)
         linked_drafts = Path(self.temporary.name).resolve() / "linked-drafts"
         linked_drafts.symlink_to(real_drafts, target_is_directory=True)
         linked_save = self.fixture.command(
@@ -357,8 +367,8 @@ class ProjectMemoryTests(unittest.TestCase):
     def test_concurrent_cas_allows_only_one_save(self):
         one = Path(self.temporary.name).resolve() / "one.md"
         two = Path(self.temporary.name).resolve() / "two.md"
-        one.write_text(LEGACY_STATE.replace("尚未开始", "版本一"), encoding="utf-8")
-        two.write_text(LEGACY_STATE.replace("尚未开始", "版本二"), encoding="utf-8")
+        write_utf8(one, LEGACY_STATE.replace("尚未开始", "版本一"))
+        write_utf8(two, LEGACY_STATE.replace("尚未开始", "版本二"))
         common = [
             sys.executable, str(SCRIPT), "save", "--project", str(self.fixture.root),
         ]
@@ -445,7 +455,7 @@ class ProjectMemoryTests(unittest.TestCase):
         hub_path = self.fixture.root / ".project-flow/hub.json"
         hub = json.loads(hub_path.read_text(encoding="utf-8"))
         hub["projectId"] = native_id
-        hub_path.write_text(json.dumps(hub), encoding="utf-8")
+        write_utf8(hub_path, json.dumps(hub))
         begun = self.fixture.command(
             "planning-begin", "--project", str(self.fixture.root),
             "--project-id", native_id, "--hub-thread-id", self.fixture.hub_id,
@@ -458,7 +468,7 @@ class ProjectMemoryTests(unittest.TestCase):
 
 Keep this historical context and migrate it into project state.
 """
-        self.fixture.plan.write_text(legacy_plan, encoding="utf-8")
+        write_utf8(self.fixture.plan, legacy_plan)
         read = self.fixture.command("read", "--project", str(self.fixture.root))
         self.assertEqual(read.returncode, 0, read.stderr)
         read_value = json.loads(read.stdout)
@@ -487,8 +497,8 @@ Keep this historical context and migrate it into project state.
         )
         plan_input = Path(self.temporary.name).resolve() / "candidate-plan.md"
         state_input = Path(self.temporary.name).resolve() / "candidate-state.md"
-        plan_input.write_text(candidate_plan, encoding="utf-8")
-        state_input.write_text(candidate_state, encoding="utf-8")
+        write_utf8(plan_input, candidate_plan)
+        write_utf8(state_input, candidate_state)
         saved = self.fixture.command(
             "save-plan", "--project", str(self.fixture.root),
             "--plan-file", str(plan_input), "--state-file", str(state_input),
@@ -525,8 +535,8 @@ Keep this historical context and migrate it into project state.
         )
         plan_input = Path(self.temporary.name).resolve() / "revised-plan.md"
         state_input = Path(self.temporary.name).resolve() / "revised-state.md"
-        plan_input.write_text(revised_plan, encoding="utf-8")
-        state_input.write_text(accepted_state, encoding="utf-8")
+        write_utf8(plan_input, revised_plan)
+        write_utf8(state_input, accepted_state)
         saved = self.fixture.command(
             "save-plan", "--project", str(self.fixture.root),
             "--plan-file", str(plan_input), "--state-file", str(state_input),
@@ -551,7 +561,7 @@ Keep this historical context and migrate it into project state.
             ),
         ):
             with self.subTest(invalid=invalid_plan):
-                plan_input.write_text(invalid_plan, encoding="utf-8")
+                write_utf8(plan_input, invalid_plan)
                 failed = self.fixture.command(
                     "save-plan", "--project", str(self.fixture.root),
                     "--plan-file", str(plan_input), "--state-file", str(state_input),
@@ -565,8 +575,8 @@ Keep this historical context and migrate it into project state.
     def test_save_plan_hash_conflict_and_new_check_have_zero_writes(self):
         plan_input = Path(self.temporary.name).resolve() / "checked-plan.md"
         state_input = Path(self.temporary.name).resolve() / "state.md"
-        plan_input.write_text(PLAN.replace("- [ ] S01", "- [x] S01"), encoding="utf-8")
-        state_input.write_text(LEGACY_STATE, encoding="utf-8")
+        write_utf8(plan_input, PLAN.replace("- [ ] S01", "- [x] S01"))
+        write_utf8(state_input, LEGACY_STATE)
         before_plan = self.fixture.plan.read_bytes()
         before_state = self.fixture.state.read_bytes()
         new_check = self.fixture.command(
@@ -579,7 +589,7 @@ Keep this historical context and migrate it into project state.
         self.assertEqual(self.fixture.plan.read_bytes(), before_plan)
         self.assertEqual(self.fixture.state.read_bytes(), before_state)
 
-        plan_input.write_text(PLAN.replace("完成本项目", "新的目标"), encoding="utf-8")
+        write_utf8(plan_input, PLAN.replace("完成本项目", "新的目标"))
         conflict = self.fixture.command(
             "save-plan", "--project", str(self.fixture.root),
             "--plan-file", str(plan_input), "--state-file", str(state_input),
@@ -654,7 +664,7 @@ Keep this historical context and migrate it into project state.
         legacy = json.loads(registry_path.read_text(encoding="utf-8"))
         legacy.pop("generation")
         legacy.pop("continuations")
-        registry_path.write_text(json.dumps(legacy), encoding="utf-8")
+        write_utf8(registry_path, json.dumps(legacy))
 
         successor = str(uuid.uuid4())
         rotation_token = str(uuid.uuid4())
@@ -839,7 +849,7 @@ Keep this historical context and migrate it into project state.
         corrupt["state"] = "bound"
         corrupt["threadId"] = predecessor
         corrupt["continuations"][-1]["threadId"] = predecessor
-        registry_path.write_text(json.dumps(corrupt), encoding="utf-8")
+        write_utf8(registry_path, json.dumps(corrupt))
         invalid_persisted = self.fixture.command("read", "--project", str(self.fixture.root))
         self.assertNotEqual(invalid_persisted.returncode, 0)
         self.assertIn("predecessor cycle", invalid_persisted.stderr)

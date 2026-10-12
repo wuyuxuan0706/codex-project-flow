@@ -1,7 +1,9 @@
 """Local lifecycle and actual engine CAS tests; never call native chat APIs."""
 import importlib.util
 import json
+import os
 from pathlib import Path
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -28,9 +30,27 @@ class UpgradeHubRefreshTests(unittest.TestCase):
         self.before = (self.fixture.plan.read_bytes(), self.fixture.state.read_bytes())
 
     def engine(self, command, *args, fail=False):
-        result = subprocess.run(["sh", str(ROOT / "scripts/project-flow.sh"), command,
-                                 "--target", str(self.fixture.root), "--project-id",
-                                 self.fixture.project_id, *args], capture_output=True, text=True)
+        if os.name == "nt":
+            shell = shutil.which("pwsh")
+            self.assertIsNotNone(shell, "PowerShell 7 is required for Windows engine tests")
+            flags = {
+                "--owner-id": "-OwnerId",
+                "--expected-hub-thread-id": "-ExpectedHubThreadId",
+                "--expected-registry-token": "-ExpectedRegistryToken",
+                "--new-hub-thread-id": "-NewHubThreadId",
+                "--hub-title": "-HubTitle",
+                "--confirmed-old-hub-inactive": "-ConfirmedOldHubInactive",
+                "--confirmed-replacement-retired": "-ConfirmedReplacementRetired",
+            }
+            invocation = [shell, "-NoLogo", "-NoProfile", "-NonInteractive", "-File",
+                          str(ROOT / "scripts/project-flow.ps1"), command, "-Target",
+                          str(self.fixture.root), "-ProjectId", self.fixture.project_id,
+                          *(flags.get(arg, arg) for arg in args)]
+        else:
+            invocation = ["sh", str(ROOT / "scripts/project-flow.sh"), command,
+                          "--target", str(self.fixture.root), "--project-id",
+                          self.fixture.project_id, *args]
+        result = subprocess.run(invocation, capture_output=True, text=True, encoding="utf-8")
         if fail:
             self.assertNotEqual(result.returncode, 0, result.stdout)
             return result

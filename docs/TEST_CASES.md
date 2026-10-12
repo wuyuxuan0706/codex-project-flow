@@ -1,4 +1,4 @@
-# Codex Project Flow 0.14.0 测试用例
+# Codex Project Flow 0.14.1 测试用例
 
 ## 范围
 
@@ -10,11 +10,11 @@
 
 | ID | 场景 | 预期结果 |
 | --- | --- | --- |
-| A-01 | 版本与 JSON | `VERSION`、plugin manifest、workflow 和 managed metadata 可解析；版本 `0.14.0`、schema 13 |
+| A-01 | 版本与 JSON | `VERSION`、plugin manifest、workflow 和 managed metadata 可解析；版本 `0.14.1`、schema 13 |
 | A-02 | 受管路径闭包 | manifest 精确包含八个路径；`PROJECT_PLAN`、`PROJECT_STATE` 为 `seed_once`，memory helper 为插件所有 |
 | A-03 | 基线闭包 | 七份保留基线路径集和哈希有效；历史基线不可变 |
 | A-04 | 干净安装 | 两平台安装八个路径并部署 schema 13；manifest 自身版本仍为 schema 1 |
-| A-05 | 支持窗口升级 | 七个支持源版本均能直接 plan 到 0.14.0；更早或无 manifest 项目拒绝 |
+| A-05 | 支持窗口升级 | 八个支持源版本均能直接 plan 到 0.14.1；更早或无 manifest 项目拒绝 |
 | A-06 | Apply/rollback | 每份保留基线可 apply、validate 并字节级 rollback |
 | A-07 | 项目事实保留 | `AGENTS.md` 项目事实段升级后保留，其他托管内容采用目标版本 |
 | A-08 | 计划状态保留 | 已有 plan/state 升级后内容保持；缺失文件只 seed 一次 |
@@ -119,9 +119,30 @@
 | C-29 | 交接完成门 | 新中枢版本、登记、标题、置顶确认后才退役旧中枢；退役失败保留锁/屏障；规划 root token 和 lineage 不变 |
 | C-30 | 预览与回滚 | plan 和 rollback 不创建或替换中枢；新中枢在屏障 released 前不派发项目任务 |
 
+## Windows 锁释放回归
+
+- 正确 owner 释放后锁文件消失，其他 owner 可重新获取。
+- owner、project ID 或项目路径不匹配时拒绝释放并保留原锁字节。
+- 另一进程持有独占句柄时，读取、释放与重复获取均不能绕过互斥。
+- 标记删除后、关闭句柄前，旧引擎风格的独占打开及竞争获取仍被拒绝；关闭后才允许新建。
+- replacement 准备阶段及未确认旧中枢退休时拒绝释放；确认后正常删除。
+- acquire 无效参数及 replacement prepare 的错误 CAS token 不遗留新锁；竞争失败不删除他人锁。
+
 ## 验证记录
 
-历史版本验证只算历史证据，不得填入 0.14.0 本轮结果。
+### 0.14.1：Windows 修复验证（2026-10-11）
+
+- 本机 Windows 10（10.0.19045）/ PowerShell 7.6.5：先复现 `current owner could not release lock`，修复后 `tests/test-bootstrap-engine.ps1` 与完整 `tests/test.ps1` 均退出 0。
+- 完整入口覆盖八份基线升级、计划/状态保留、字节级回滚、引擎互斥与锁恢复；记忆测试 22 项运行、21 项通过、1 项因 WinError 1314 缺少符号链接权限跳过；模型策略 5/5、中枢交接引擎集成 6/6 通过。
+- `tests/test-parity.ps1 -BaselineVersion 0.14.0 -RequirePosix` 退出 0：8 受管文件、2 类锁；实际 Windows PowerShell/Git Bash/Python 引擎互操作。
+- PowerShell 5.1.19041.6456 与 7.6.5 的原生句柄冒烟验证通过：标记删除后其他打开仍失败，关闭句柄后锁文件消失。没有声称完整 Windows PowerShell 5.1 回归。
+- Python 测试夹具改为明确字节写入，并在同一 read 测试中覆盖 LF 与 CRLF 原文和原始字节 SHA-256；生产记忆 helper 不变。Windows 集成用例实际调用 PowerShell，不再依赖 `sh` 或跳过引擎检查。
+- 源码 validator、基线认证与差异检查通过；新增 GitHub Actions Windows/Linux 持续回归，远端结果以该提交的 Actions 记录为准。
+- 本轮不覆盖真实 Codex 任务 API 的模型选择、置顶、归档及完整中枢交接；不模拟磁盘写入故障，不自动升级其他项目。
+
+### 0.14.0：历史验证
+
+以下为历史版本证据，不替代 0.14.1 本轮验证。
 
 2026-10-11，0.14.0 本轮源码 validator、完整 POSIX 回归和本机 macOS PowerShell 7.6.6 完整回归均退出 0。两套入口均覆盖七份历史基线升级、plan/state 保留和字节级 rollback；记忆测试 22/22、默认模型策略测试 5/5、新中枢交接集成测试 6/6 通过。Bootstrap/Upgrade Skill 格式验证及差异检查通过。
 

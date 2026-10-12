@@ -40,6 +40,31 @@ function Start-Engine([string[]]$Arguments) {
     foreach ($argument in @("-NoLogo", "-NoProfile", "-NonInteractive", "-File", $engine) + $Arguments) { [void]$start.ArgumentList.Add($argument) }
     $process = [Diagnostics.Process]::new(); $process.StartInfo = $start; [void]$process.Start(); $process
 }
+function Assert-FileUnchanged([string]$Path, [byte[]]$Before, [string]$Message) {
+    Assert (Test-Path -LiteralPath $Path -PathType Leaf) $Message
+    Assert ([Convert]::ToBase64String($Before) -ceq [Convert]::ToBase64String([IO.File]::ReadAllBytes($Path))) $Message
+}
+function Assert-WindowsPendingDeleteExclusion([string]$Root, [string]$Project, [string]$Owner) {
+    # Load the real lock functions without running the command-line dispatcher.
+    $tokens = $null; $parseErrors = $null
+    $ast = [Management.Automation.Language.Parser]::ParseFile($engine, [ref]$tokens, [ref]$parseErrors)
+    Assert ($parseErrors.Count -eq 0) "engine parse failed in pending-delete fixture"
+    foreach ($definition in $ast.FindAll({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] }, $false)) {
+        . ([scriptblock]::Create($definition.Extent.Text))
+    }
+    $script:ControlRootName = ".project-flow"
+    Set-FlowContext $Root
+    $held = Enter-BootstrapLock $Project
+    try {
+        # The pathname must remain unavailable until the validating handle closes.
+        Remove-BootstrapLockFile $held
+        foreach ($command in @("bootstrap-lock-inspect", "bootstrap-lock-release", "bootstrap-lock-acquire")) {
+            $attempt = Invoke-Engine @($command, "-Target", $Root, "-ProjectId", $Project, "-OwnerId", $Owner, "-Phase", "installing")
+            Assert ($attempt.ExitCode -ne 0) ("another process entered a pending-delete lock: " + $command)
+        }
+    } finally { Exit-BootstrapLock $held }
+    Assert (-not (Test-Path -LiteralPath (Join-Path $Root ".project-flow/bootstrap.lock"))) "pending-delete handle close did not remove the lock"
+}
 
 try {
     [IO.Directory]::CreateDirectory($temp) | Out-Null
@@ -99,11 +124,31 @@ try {
     $copy = Join-Path $temp "copied-project"; Copy-Item -LiteralPath $root -Destination $copy -Recurse
     $result = Invoke-Engine @("hub-read", "-Target", $copy, "-ProjectId", $project)
     Assert ($result.ExitCode -ne 0) "copied project reused the original registry"
+    $copiedLockPath = Join-Path $copy ".project-flow/bootstrap.lock"
+    $copiedLockBytes = [IO.File]::ReadAllBytes($copiedLockPath)
+    $originalLockBytes = [IO.File]::ReadAllBytes($lockPath)
+    $result = Invoke-Engine @("bootstrap-lock-release", "-Target", $copy, "-ProjectId", $project, "-OwnerId", $ownerA)
+    Assert ($result.ExitCode -ne 0) "copied project released a lock bound to the original path"
+    Assert-FileUnchanged $copiedLockPath $copiedLockBytes "copied project release changed its lock"
+    Assert-FileUnchanged $lockPath $originalLockBytes "copied project release changed the original lock"
     $result = Invoke-Engine @("hub-read", "-Target", $root, "-ProjectId", "bad/id")
     Assert ($result.ExitCode -ne 0) "illegal identifier was accepted"
 
+    $releaseBytes = [IO.File]::ReadAllBytes($lockPath)
+    $result = Invoke-Engine @("bootstrap-lock-release", "-Target", $root, "-ProjectId", "project-bootstrap-9999", "-OwnerId", $ownerA)
+    Assert ($result.ExitCode -ne 0) "wrong project released the lock"
+    Assert-FileUnchanged $lockPath $releaseBytes "wrong project release changed the lock"
     $result = Invoke-Engine @("bootstrap-lock-release", "-Target", $root, "-ProjectId", $project, "-OwnerId", $ownerB)
-    Assert ($result.ExitCode -ne 0) "non-owner released the lock"
+    Assert ($result.ExitCode -ne 0) "wrong owner released the lock"
+    Assert-FileUnchanged $lockPath $releaseBytes "wrong owner release changed the lock"
+    $held = [IO.File]::Open($lockPath, [IO.FileMode]::Open, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+    try {
+        foreach ($command in @("bootstrap-lock-inspect", "bootstrap-lock-release", "bootstrap-lock-acquire")) {
+            $result = Invoke-Engine @($command, "-Target", $root, "-ProjectId", $project, "-OwnerId", $ownerA, "-Phase", "installing")
+            Assert ($result.ExitCode -ne 0) ("another process entered an exclusively held lock: " + $command)
+        }
+    } finally { $held.Dispose() }
+    Assert-FileUnchanged $lockPath $releaseBytes "competing commands changed the exclusively held lock"
     $validLockText = Get-Content -Raw -Encoding UTF8 $lockPath
     $invalidTimes = $validLockText | ConvertFrom-Json; $invalidTimes.renewedAt = "2025-01-01T00:00:00Z"
     Write-Utf8 $lockPath (($invalidTimes | ConvertTo-Json -Depth 10) + "`n")
@@ -145,7 +190,63 @@ try {
     $result = Invoke-Engine @("bootstrap-lock-release", "-Target", $root, "-ProjectId", $project, "-OwnerId", $ownerA)
     Assert ($result.ExitCode -ne 0) "previous owner released a recovered lock"
     $result = Invoke-Engine @("bootstrap-lock-release", "-Target", $root, "-ProjectId", $project, "-OwnerId", $ownerB)
-    Assert ($result.ExitCode -eq 0 -and -not (Test-Path -LiteralPath $lockPath)) "current owner could not release lock"
+    Assert ($result.ExitCode -eq 0 -and -not (Test-Path -LiteralPath $lockPath)) ("current owner could not release lock: " + $result.StdErr)
+    Assert (($result.StdOut | ConvertFrom-Json).released -eq $true) "successful release did not report released=true"
+    $result = Invoke-Engine @("bootstrap-lock-acquire", "-Target", $root, "-ProjectId", $project, "-OwnerId", $ownerA, "-Phase", "installing")
+    Assert ($result.ExitCode -eq 0) ("released lock could not be reacquired: " + $result.StdErr)
+    if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+        Assert-WindowsPendingDeleteExclusion $root $project $ownerA
+        $result = Invoke-Engine @("bootstrap-lock-acquire", "-Target", $root, "-ProjectId", $project, "-OwnerId", $ownerB, "-Phase", "installing")
+        Assert ($result.ExitCode -eq 0) ("pending-delete lock could not be reacquired after close: " + $result.StdErr)
+    }
+    $releaseOwner = if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) { $ownerB } else { $ownerA }
+    $result = Invoke-Engine @("bootstrap-lock-release", "-Target", $root, "-ProjectId", $project, "-OwnerId", $releaseOwner)
+    Assert ($result.ExitCode -eq 0 -and -not (Test-Path -LiteralPath $lockPath)) "reacquired lock could not be released"
+
+    $invalidRoot = Join-Path $temp "invalid-acquire"; [IO.Directory]::CreateDirectory($invalidRoot) | Out-Null
+    $invalidLockPath = Join-Path $invalidRoot ".project-flow/bootstrap.lock"
+    $result = Invoke-Engine @("bootstrap-lock-acquire", "-Target", $invalidRoot, "-ProjectId", $project, "-OwnerId", "bad/owner", "-Phase", "installing")
+    Assert ($result.ExitCode -ne 0 -and -not (Test-Path -LiteralPath $invalidLockPath)) "invalid acquire left an unpublished lock"
+    $result = Invoke-Engine @("bootstrap-lock-acquire", "-Target", $invalidRoot, "-ProjectId", $project, "-OwnerId", $ownerA, "-Phase", "installing")
+    Assert ($result.ExitCode -eq 0) "failed acquire prevented a later valid acquire"
+    $result = Invoke-Engine @("bootstrap-lock-release", "-Target", $invalidRoot, "-ProjectId", $project, "-OwnerId", $ownerA)
+    Assert ($result.ExitCode -eq 0 -and -not (Test-Path -LiteralPath $invalidLockPath)) "valid acquire after failure could not release"
+
+    # A failed replacement prepare owns only its unpublished file; cleanup must
+    # preserve the registry and permit the authorized replacement to retry.
+    $hubBeforeReplacement = [IO.File]::ReadAllBytes($hubPath)
+    $hub = (Invoke-Engine @("hub-read", "-Target", $root, "-ProjectId", $project)).StdOut | ConvertFrom-Json
+    $wrongToken = "sha256:" + ("0" * 64)
+    $result = Invoke-Engine @("hub-replacement-prepare", "-Target", $root, "-ProjectId", $project, "-OwnerId", $ownerB, "-ExpectedHubThreadId", $threadA, "-ExpectedRegistryToken", $wrongToken, "-NewHubThreadId", $threadB, "-HubTitle", $title, "-ConfirmedOldHubInactive")
+    Assert ($result.ExitCode -ne 0 -and $result.StdErr -match "changed after authorization") ("failed prepare masked the authorization error: " + $result.StdErr)
+    Assert (-not (Test-Path -LiteralPath $lockPath)) "failed replacement prepare left an unpublished lock"
+    Assert-FileUnchanged $hubPath $hubBeforeReplacement "failed replacement prepare changed registry"
+    $result = Invoke-Engine @("hub-replacement-prepare", "-Target", $root, "-ProjectId", $project, "-OwnerId", $ownerB, "-ExpectedHubThreadId", $threadA, "-ExpectedRegistryToken", $hub.registryToken, "-NewHubThreadId", $threadB, "-HubTitle", $title, "-ConfirmedOldHubInactive")
+    Assert ($result.ExitCode -eq 0) ("replacement prepare after failed cleanup could not retry: " + $result.StdErr)
+    $preparedBytes = [IO.File]::ReadAllBytes($lockPath)
+    foreach ($confirmation in @($false, $true)) {
+        $releaseArgs = @("bootstrap-lock-release", "-Target", $root, "-ProjectId", $project, "-OwnerId", $ownerB)
+        if ($confirmation) { $releaseArgs += "-ConfirmedReplacementRetired" }
+        $result = Invoke-Engine $releaseArgs
+        Assert ($result.ExitCode -ne 0) "prepared replacement was released before commit"
+        Assert-FileUnchanged $lockPath $preparedBytes "pre-commit release changed replacement evidence"
+    }
+    $result = Invoke-Engine @("hub-replacement-prepare", "-Target", $root, "-ProjectId", $project, "-OwnerId", $ownerC, "-ExpectedHubThreadId", $threadA, "-ExpectedRegistryToken", $hub.registryToken, "-NewHubThreadId", $threadB, "-HubTitle", $title, "-ConfirmedOldHubInactive")
+    Assert ($result.ExitCode -ne 0) "competing prepare acquired an existing replacement lock"
+    Assert-FileUnchanged $lockPath $preparedBytes "failed competing prepare removed the existing owner's lock"
+    $result = Invoke-Engine @("hub-replacement-commit", "-Target", $root, "-ProjectId", $project, "-OwnerId", $ownerB)
+    Assert ($result.ExitCode -eq 0) ("replacement commit failed: " + $result.StdErr)
+    $committedBytes = [IO.File]::ReadAllBytes($lockPath)
+    $result = Invoke-Engine @("bootstrap-lock-release", "-Target", $root, "-ProjectId", $project, "-OwnerId", $ownerB)
+    Assert ($result.ExitCode -ne 0) "replacement lock released without retirement confirmation"
+    Assert-FileUnchanged $lockPath $committedBytes "unconfirmed retirement release changed replacement evidence"
+    $result = Invoke-Engine @("bootstrap-lock-release", "-Target", $root, "-ProjectId", $project, "-OwnerId", $ownerA, "-ConfirmedReplacementRetired")
+    Assert ($result.ExitCode -ne 0) "wrong owner released a retired replacement"
+    Assert-FileUnchanged $lockPath $committedBytes "wrong owner retirement release changed replacement evidence"
+    $result = Invoke-Engine @("bootstrap-lock-release", "-Target", $root, "-ProjectId", $project, "-OwnerId", $ownerB, "-ConfirmedReplacementRetired")
+    Assert ($result.ExitCode -eq 0 -and -not (Test-Path -LiteralPath $lockPath)) ("confirmed replacement retirement did not delete the lock: " + $result.StdErr)
+    $hub = (Invoke-Engine @("hub-read", "-Target", $root, "-ProjectId", $project)).StdOut | ConvertFrom-Json
+    Assert ($hub.threadId -ceq $threadB) "replacement release changed the committed hub"
 
     $orphanRoot = Join-Path $temp "orphan"; [IO.Directory]::CreateDirectory($orphanRoot) | Out-Null
     $result = Invoke-Engine @("bootstrap-lock-acquire", "-Target", $orphanRoot, "-ProjectId", $project, "-OwnerId", $ownerA, "-Phase", "installing")

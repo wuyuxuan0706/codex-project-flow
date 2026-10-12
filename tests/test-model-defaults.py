@@ -6,6 +6,7 @@ not synthesize an API payload or claim that hidden agents read the app setting.
 """
 
 import json
+import os
 from pathlib import Path
 import re
 import shutil
@@ -15,6 +16,7 @@ import unittest
 
 
 ROOT = Path(__file__).resolve().parents[1]
+ENGINE_SHELL = shutil.which("pwsh" if os.name == "nt" else "sh")
 CREATION_RULES = [
     "AGENTS.md",
     ".agents/WORKFLOW_PROTOCOL.md",
@@ -65,7 +67,7 @@ class ModelDefaultsContractTests(unittest.TestCase):
                 self.assertTrue("reasoning_effort" in text, relative)
                 self.assertTrue("继承" in text, relative)
 
-    @unittest.skipUnless(shutil.which("sh"), "POSIX engine unavailable")
+    @unittest.skipUnless(ENGINE_SHELL, "Platform engine shell unavailable")
     def test_validator_rejects_missing_or_overridden_model_policy(self):
         # Real public disk-validation boundary, not a mock of chat creation.
         with tempfile.TemporaryDirectory(prefix="codex-flow-model-policy-") as directory:
@@ -81,18 +83,26 @@ class ModelDefaultsContractTests(unittest.TestCase):
             original = json.loads(path.read_text(encoding="utf-8-sig"))
 
             def validate():
+                if os.name == "nt":
+                    command = [ENGINE_SHELL, "-NoLogo", "-NoProfile", "-NonInteractive",
+                               "-File", str(ROOT / "scripts/project-flow.ps1"), "validate",
+                               "-Target", str(target), "-AllowPlaceholders", "-Runtime"]
+                else:
+                    command = [ENGINE_SHELL, str(ROOT / "scripts/project-flow.sh"), "validate",
+                               "--target", str(target), "--allow-placeholders", "--runtime"]
                 return subprocess.run(
-                    ["sh", str(ROOT / "scripts/project-flow.sh"), "validate",
-                     "--target", str(target), "--allow-placeholders", "--runtime"],
-                    capture_output=True, text=True,
+                    command, capture_output=True, text=True, encoding="utf-8",
                 )
 
             clean = validate()
             self.assertEqual(clean.returncode, 0, clean.stderr)
-            for field, value, reason in (
-                ("model_policy", "force_named_model", "task model policy"),
-                ("creation_omit_fields", ["thinking"], "task model omission"),
-                ("hidden_agents_omit_fields", ["model"], "hidden agent model omission"),
+            for field, value, posix_reason, windows_reason in (
+                ("model_policy", "force_named_model", "task model policy",
+                 "model-policy must be codex_default_no_overrides"),
+                ("creation_omit_fields", ["thinking"], "task model omission",
+                 "creation-omit-fields invalid"),
+                ("hidden_agents_omit_fields", ["model"], "hidden agent model omission",
+                 "hidden-agents-omit-fields invalid"),
             ):
                 with self.subTest(field=field):
                     mutated = json.loads(json.dumps(original))
@@ -100,12 +110,14 @@ class ModelDefaultsContractTests(unittest.TestCase):
                     path.write_text(json.dumps(mutated), encoding="utf-8")
                     result = validate()
                     self.assertNotEqual(result.returncode, 0)
-                    self.assertIn(reason, result.stderr)
+                    self.assertIn(windows_reason if os.name == "nt" else posix_reason,
+                                  result.stderr)
             original["tasks"].pop("model_policy")
             path.write_text(json.dumps(original), encoding="utf-8")
             missing = validate()
             self.assertNotEqual(missing.returncode, 0)
-            self.assertIn("tasks fields are invalid", missing.stderr)
+            self.assertIn("task-fields invalid" if os.name == "nt" else "tasks fields are invalid",
+                          missing.stderr)
 
 
 if __name__ == "__main__":
