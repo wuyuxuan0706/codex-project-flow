@@ -1042,6 +1042,13 @@ def validate_installation(target, allow_placeholders=False, quiet=False, runtime
         expected_skills = sorted([
             "bootstrap-project-flow/SKILL.md",
             "bootstrap-project-flow/agents/openai.yaml",
+            "bootstrap-project-flow/references/native-tools.md",
+            "drawio-review/SKILL.md",
+            "drawio-review/agents/openai.yaml",
+            "grilling/SKILL.md",
+            "grilling/agents/openai.yaml",
+            "grill-me/SKILL.md",
+            "grill-me/agents/openai.yaml",
             "upgrade-project-flow/SKILL.md",
             "upgrade-project-flow/agents/openai.yaml",
             "upgrade-project-flow/references/coordination.md",
@@ -1050,7 +1057,23 @@ def validate_installation(target, allow_placeholders=False, quiet=False, runtime
         ])
         actual_skills = sorted(path.relative_to(PLUGIN_ROOT / "skills").as_posix() for path in (PLUGIN_ROOT / "skills").rglob("*") if path.is_file())
         if actual_skills != expected_skills:
-            fail("Plugin must contain exactly the seven expected Skill files", 1)
+            fail("Plugin must contain exactly the fourteen expected Skill files (including the native-tools reference)", 1)
+        if plugin.get("skills") != "./skills/":
+            fail("Plugin skills must expose ./skills/", 1)
+        for skill_name in ("grilling", "grill-me", "drawio-review"):
+            skill = read_text(plugin_input("skills/" + skill_name + "/SKILL.md", "bundled Skill"))
+            frontmatter = re.match(r"\A---\n(.*?)\n---(?:\n|\Z)", skill, re.DOTALL)
+            if not frontmatter:
+                fail(skill_name + " Skill requires YAML frontmatter", 1)
+            metadata = frontmatter.group(1)
+            names = re.findall(r"^name:[ \t]*(.*)$", metadata, re.MULTILINE)
+            descriptions = re.findall(r"^description:[ \t]*(.*)$", metadata, re.MULTILINE)
+            if len(names) != 1 or names[0].strip() not in (skill_name, '"' + skill_name + '"', "'" + skill_name + "'"):
+                fail(skill_name + " Skill name must be " + skill_name, 1)
+            # These bundled Skills use single-line scalars; no YAML dependency is needed.
+            description = descriptions[0].strip().strip("\"'").strip() if len(descriptions) == 1 else ""
+            if not description or description.startswith(("#", "|", ">")) or description in ("null", "~"):
+                fail(skill_name + " Skill description must be a nonempty single-line scalar", 1)
 
         conflict_pattern = re.compile(r'任务管理(能力)?不可用时.{0,20}(回到|回退到)中枢|continue_in_hub|hub_execution_allowed|"hidden_subagents"\s*:\s*"may_substitute"', re.DOTALL)
         for relative in ("AGENTS.md", ".agents", "docs"):
@@ -1067,7 +1090,9 @@ def validate_installation(target, allow_placeholders=False, quiet=False, runtime
         if entry["path"].endswith(".md"):
             validate_markdown(live, entry["path"])
     if not runtime:
-        for relative in ("README.md", "docs/TEST_CASES.md", "templates/PROJECT_PLAN.md", "templates/PROJECT_STATE.md", "skills/bootstrap-project-flow/SKILL.md", "skills/upgrade-project-flow/SKILL.md", "skills/upgrade-project-flow/references/coordination.md", "skills/upgrade-project-flow/references/file-transaction.md"):
+        # Upstream grilling/grill-me have no headings: preserve their bytes and
+        # validate their discovery metadata above instead of imposing our layout.
+        for relative in ("README.md", "docs/TEST_CASES.md", "templates/PROJECT_PLAN.md", "templates/PROJECT_STATE.md", "skills/bootstrap-project-flow/SKILL.md", "skills/bootstrap-project-flow/references/native-tools.md", "skills/drawio-review/SKILL.md", "skills/upgrade-project-flow/SKILL.md", "skills/upgrade-project-flow/references/coordination.md", "skills/upgrade-project-flow/references/file-transaction.md"):
             validate_markdown(plugin_input(relative, "delivery Markdown"), relative)
     for relative in retired_paths:
         if target.path(relative).exists():

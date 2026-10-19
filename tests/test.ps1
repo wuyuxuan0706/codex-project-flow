@@ -141,7 +141,7 @@ try{
  & $engine install -Target $failedInstall -ProjectName FailedInstall 2>$null;$ok=$?;Assert(-not $ok)"post-manifest validation failure unexpectedly succeeded";Assert(-not(Test-Path(Join-Path $failedInstall ".project-flow/manifest.json")))"failed install left manifest"
  foreach($path in @($currentPaths|Where-Object{$_-cne'.agents/workflow.json'})){Assert(-not(Test-Path(Join-Path $failedInstall $path)))"failed install left managed file $path"};Assert((Text $invalidWorkflow)-ceq"{}")"failed install changed preexisting invalid workflow"
  $versions=@(Get-ChildItem -LiteralPath (Join-Path $repo baselines) -Directory|Where-Object{$_.Name-match'^\d+\.\d+\.\d+$'}|Sort-Object{[version]$_.Name}|ForEach-Object Name)
- Assert(($versions-join',')-ceq'0.8.3,0.9.0,0.9.1,0.10.0,0.11.0,0.12.0,0.13.0,0.14.0')"unexpected retained baselines"
+ Assert(($versions-join',')-ceq'0.8.3,0.9.0,0.9.1,0.10.0,0.11.0,0.12.0,0.13.0,0.14.0,0.14.1,0.14.2,0.14.3')"unexpected retained baselines"
  foreach($version in $versions){
   $f=New-Fixture $version ("plan-"+$version.Replace(".","-"));$plan=& $engine plan -Target $f *>&1|Out-String
   $ok=$?;Assert $ok "$version plan";Assert($plan.Contains("UPGRADE $version -> $currentVersion"))"$version target"
@@ -193,7 +193,7 @@ try{
  & $engine rollback -Target $upgrade -Rollback $txn;$ok=$?;Assert $ok "rollback"
  $restored=TreeHashes $upgrade;Assert(SameMap $before $restored)"rollback tree mismatch"
  & $engine rollback -Target $upgrade -Rollback $txn;$ok=$?;Assert $ok "idempotent rollback";$restoredAgain=TreeHashes $upgrade;Assert(SameMap $restored $restoredAgain)"idempotent rollback changed tree"
-foreach($patchVersion in @("0.8.3","0.9.0","0.9.1","0.10.0","0.11.0","0.12.0","0.13.0","0.14.0")){
+foreach($patchVersion in @("0.8.3","0.9.0","0.9.1","0.10.0","0.11.0","0.12.0","0.13.0","0.14.0","0.14.1","0.14.2","0.14.3")){
  $patchFixture=New-Fixture $patchVersion ("patch-upgrade-"+$patchVersion.Replace(".","-"))
  WriteUtf8 (Join-Path $patchFixture "docs/PROJECT_PLAN.md") "# Custom plan`n`n## 目标`n`n保留计划。`n`n## 总体进度`n`n0%`n`n## 任务步骤`n`n- [ ] S01 | 保留`n"
  WriteUtf8 (Join-Path $patchFixture "docs/PROJECT_STATE.md") "# Custom state`n`n## 当前目标`n`n保留状态。`n"
@@ -288,6 +288,7 @@ $markdownPath=Join-Path $clean "docs/PROJECT_STATE.md";$markdownOriginal=Text $m
  Assert ($null-ne$memoryPython) "Python 3 is required for project-memory and model-policy tests"
  & $memoryPython.Source (Join-Path $repo "tests/test-project-memory.py");Assert ($LASTEXITCODE-eq0) "project-memory regression"
  & $memoryPython.Source (Join-Path $repo "tests/test-model-defaults.py");Assert ($LASTEXITCODE-eq0) "model defaults contract"
+ & $memoryPython.Source (Join-Path $repo "tests/test-plugin-package.py") --engine powershell;Assert ($LASTEXITCODE-eq0) "bundled plugin skills package"
  & $memoryPython.Source (Join-Path $repo "tests/test-upgrade-hub-refresh.py");Assert ($LASTEXITCODE-eq0) "upgrade hub refresh integration"
  Write-Host "All PowerShell regression tests passed."
 }finally{if(Test-Path $temp){Remove-Item -LiteralPath $temp -Recurse -Force}}

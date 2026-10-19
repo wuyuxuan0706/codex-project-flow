@@ -79,7 +79,7 @@
 | A-67 | 规划状态持久化 | 每轮把未决树、问题/回答、事实和下一 frontier 保存到 state；继任从未决节点继续且不重复已答问题 |
 | A-68 | Save-plan 完成门 | 目标、包含/排除、验收标准、步骤明确，frontier 为空且用户确认共同理解后才允许 `save-plan` |
 | A-69 | 未完成规划 | 任一完成字段、用户确认或树分支仍未决时保持讨论状态，不保存最终计划、不启动执行 |
-| A-70 | Grilling 降级 | `$grilling` 不可用时先告知，再执行协议内置同流程；事实代理不可用时任务自行只读查证，不让用户代查 |
+| A-70 | Grilling 打包与恢复 | 正常包包含上游 `grilling` 和 `grill-me` 入口及许可，源文件哈希符合固定版本；技能缺失或名称错误时校验失败；规划提示传递实际技能路径。仅旧路径或安装损坏时告知异常再执行协议兼容流程；事实代理不可用时自行只读查证 |
 | A-71 | Planning continue 顺序 | STATE 先保存 rotation 意图及所得 real/queued 身份，再以根 token、精确前任、预期 generation 和前任 `rotation.key` 精确首行 CAS registry，最后归档前任 |
 | A-72 | Planning continuation 唯一性 | `planning-continue` 严格校验由 project/current hub/root token/predecessor/下一代组成的 `rotation.key`，只推进一个 generation 并保存该代 `hubThreadId`；相同交接在 hub rebind 后仍按原 key 幂等，不同 tuple 零写入 |
 | A-73 | Queued continuation | queued 后继的 `planning-resolve` 补 real ID 且保留 client/lineage；Bootstrap/Upgrade 跟随当前代，不恢复旧前任 |
@@ -151,3 +151,32 @@
 PowerShell 本轮是在 macOS 执行 `.ps1` 的动态回归，不等于 Windows 原生认证。Windows 原生运行及 Windows/Git Bash 跨引擎差分仍未覆盖；新增六项交接测试实际调用 POSIX 引擎，不能冒称为原生聊天接口或 Windows 交接验证。
 
 0.13.0 曾在隔离临时项目实际创建中枢和规划聊天，验证双文件读取及首轮主动访谈；用户随后自行归档并取消独立演练，选择在真实项目日常使用中验证。0.14.0 的原生新中枢交接与模型选择尚未在实际项目验收；本轮不恢复已归档测试聊天，也不自动升级其他项目。仅更新本机插件，不提交或推送远程。
+
+## 0.14.2 本机验证：2026-10-11
+
+- 原版 Matt Pocock grilling 固定在提交 `49dd158d1076134a641b33efb035946536778336`；技能及许可字节与记录哈希匹配，grill-me 仅入口调用做 Codex 适配。
+- Windows PowerShell 完整回归通过：记忆 21 项通过、1 项因符号链接权限跳过，模型策略 5/5、包测试 6/6、中枢交接 6/6。
+- Git Bash/POSIX 包测试 6/6 通过；0.14.1 基线跨引擎差分通过，覆盖 8 受管文件及 2 类锁。
+- 安装到本机后，缓存五个第三方文件哈希符合 provenance；原生 Codex skills/list 返回两个带插件前缀的技能，均启用且路径为 0.14.2。
+- 本轮未运行 Linux 全量回归或真实用户访谈。CI 配置已更新，但未推送运行；文件存在和原生可发现性不等于访谈行为已验收。
+
+## Drawio 技能验收场景（0.14.3）
+
+- D-01：已有文件仅修改指定 page 的填充色。保留文字、其他页面和关系；渲染最新内容并内存回传。
+- D-02：用户直接给定按钮文案并要求填入，不再重复请求同一文案批准。只有本地 PNG 导出能力时不得偷偷落盘，明确图片回传与视觉检查未完成。
+- D-03：参考截图重建需区分重建与恢复；自行拟定的完整文案和未确认业务关系先评审，不能由布局推断关系。设计未定或部署目标不明时不执行上线。
+- D-04：技能随插件安装；缺少技能文件、名称错误、空描述或错误技能发现路径时，两端源码校验拒绝通过。
+- D-05：每轮分别记录文案、图形和整体设计认可范围；局部认可不勾选总体步骤，图稿手动修改须从最新内容接续。
+
+本轮范围为技能整理和工作流集成。行为走查属于模拟决策检查，不等于真实图稿编辑、原生渲染或手机端图片展示验收。
+
+### 0.14.3 本轮结果：2026-10-13
+
+Skill Creator 和源包 PowerShell 校验通过。两端包测试各 6/6 通过（PowerShell 21.185 秒、Git Bash/POSIX 5.448 秒）；0.14.2 基线跨引擎差分通过（8 受管文件、2 类锁）。三个模拟场景走查符合授权及输出限制。安装后原生 skills/list 识别并启用 codex-project-flow:drawio-review，路径为 0.14.3；Skill、UI 元数据和三份工作流规则均与源码一致。未进行真实图稿渲染或手机评审，未重复此前无关全量回归。
+
+## 0.14.4 工具发现验证：2026-10-18
+
+- 在当前 Windows 会话通过 Code Mode ALL_TOOLS 发现原生 list_projects、set_thread_title、create_thread、move_thread_to_sidebar_section 等接口，读取其真实调用定义；只读 list_projects 调用成功，返回 PlcEAP 的精确已保存路径及原生 ID。未修改 PlcEAP 文件或聊天。
+- 两端插件包专项各 7/7 通过，含必需 native-tools.md 缺失时拒绝通过。模拟走查覆盖工具延后可发现且无预先ID、create_thread缺失、list_projects访问被拒绝三种情境。
+- 走查发现“ALL_TOOLS保证完整schema”的表述过强，已修正为仅保证元数据，必须确认真实调用契约；无契约不猜参数。
+- 未实测原报错聊天，不将当前会话成功当作该聊天已恢复；未试改标题或创建规划聊天，不声称完成新项目端到端初始化。

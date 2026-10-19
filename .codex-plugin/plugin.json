@@ -1,6 +1,6 @@
 {
   "name": "codex-project-flow",
-  "version": "0.14.1",
+  "version": "0.14.4",
   "description": "Install and safely upgrade a schema-13 Codex workflow using default model settings, a renewed hub on apply, a separate planning chat, and preserved local plan and state memory.",
   "author": {
     "name": "codex-project-flow contributors"

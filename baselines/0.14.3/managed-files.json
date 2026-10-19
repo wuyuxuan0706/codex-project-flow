@@ -1,0 +1,83 @@
+{
+  "schema_version": 1,
+  "workflow_version": "0.14.3",
+  "retired_paths": [],
+  "files": [
+    {
+      "path": "AGENTS.md",
+      "source": "AGENTS.md",
+      "policy": "merge_manual",
+      "render": "project_name",
+      "ownership": "mixed",
+      "conflict_resolution": "preserve_markdown_sections",
+      "preserve_sections": [
+        "项目事实"
+      ],
+      "content_hash": "sha256:81bb5d72a190c0d8092d5a48acdcebaa9d1ecb2d88488e971c102ae2c3e98f69"
+    },
+    {
+      "path": ".agents/workflow.json",
+      "source": ".agents/workflow.json",
+      "policy": "structured_manual",
+      "render": "project_name_json",
+      "ownership": "plugin",
+      "conflict_resolution": "upstream_wins",
+      "content_hash": "sha256:78996629599d40bc1070ea1da2bfca7e990bb241c3ade0b1a0dcf322d13c30ba"
+    },
+    {
+      "path": ".agents/WORKFLOW_PROTOCOL.md",
+      "source": ".agents/WORKFLOW_PROTOCOL.md",
+      "policy": "replace_if_unmodified",
+      "render": "project_name",
+      "ownership": "plugin",
+      "conflict_resolution": "upstream_wins",
+      "content_hash": "sha256:9de534eee74c0b8a806cecc4df833f961cdcd83fe6d4c99d4b7505315f5f8fee"
+    },
+    {
+      "path": ".agents/skills/project-workflow-manager/SKILL.md",
+      "source": ".agents/skills/project-workflow-manager/SKILL.md",
+      "policy": "replace_if_unmodified",
+      "render": "project_name",
+      "ownership": "plugin",
+      "conflict_resolution": "upstream_wins",
+      "content_hash": "sha256:e00a5c24d2f68d0d3da084402ee71858980122cdcbbce182b5cb3ca9ea28ef29"
+    },
+    {
+      "path": ".agents/skills/project-workflow-manager/agents/openai.yaml",
+      "source": ".agents/skills/project-workflow-manager/agents/openai.yaml",
+      "policy": "replace_if_unmodified",
+      "render": "project_name",
+      "ownership": "plugin",
+      "conflict_resolution": "upstream_wins",
+      "content_hash": "sha256:624e0679a6a6d91906dd8fff22e0aa59280fab1064e0c5f36918ea905997ff75"
+    },
+    {
+      "path": "docs/PROJECT_STATE.md",
+      "source": "templates/PROJECT_STATE.md",
+      "policy": "seed_once",
+      "render": "project_name",
+      "ownership": "project",
+      "conflict_resolution": "preserve",
+      "content_hash": "sha256:9b374af86435e9d5bb1fe0b6c05c2aba4fa819f2f4fe4aabc0440819d2026a36"
+    },
+    {
+      "path": "docs/PROJECT_PLAN.md",
+      "source": "templates/PROJECT_PLAN.md",
+      "policy": "seed_once",
+      "render": "project_name",
+      "ownership": "project",
+      "conflict_resolution": "preserve",
+      "content_hash": "sha256:41678e9d21d75e052ce1f5cb0bf4abaf62e2ff16ce9b68ab0d7f8924c80b9b35"
+    },
+    {
+      "path": ".agents/skills/project-workflow-manager/scripts/project-memory.py",
+      "source": ".agents/skills/project-workflow-manager/scripts/project-memory.py",
+      "policy": "replace_if_unmodified",
+      "render": "none",
+      "ownership": "plugin",
+      "conflict_resolution": "upstream_wins",
+      "content_hash": "sha256:d5b839e02d86a61024c5b8d27080061b9b11f6df63276f977ffc0aec15771541"
+    }
+  ],
+  "kind": "managed_files_baseline"
+}

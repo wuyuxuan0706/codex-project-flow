@@ -24,7 +24,7 @@ jobs:
         run: ./tests/test.ps1
       - name: PowerShell and Git Bash interoperability
         shell: pwsh
-        run: ./tests/test-parity.ps1 -BaselineVersion 0.14.0 -RequirePosix
+        run: ./tests/test-parity.ps1 -BaselineVersion 0.14.3 -RequirePosix
 
   posix:
     runs-on: ubuntu-latest

@@ -1,33 +1,63 @@
 # 项目状态
 
-## 当前目标与授权
+## 当前请求：Windows 初始化工具发现（0.14.4）
+
+- 2026-10-18 用户报告 Windows 新项目 Bootstrap 曾误报缺少 list_projects/set_thread_title/create_thread；随后用户确认当前项目已初始化成功，本次目标是防止后续误报。当前会话从 ALL_TOOLS 发现原生 mcp__codex_app__ 接口，读取真实定义并成功只读调用 list_projects；返回 PlcEAP 已保存根 F:/Workplace/PlCEAP 和原生 ID。不能据此证明旧报错会话能力相同。
+- 新增 Bootstrap references/native-tools.md 并在 Bootstrap/Upgrade 入口先读；先发现与读取契约，再只读查询、精确根/主机绑定项目；缺少预先ID时可用精确原生唯一匹配建立ID，已有ID仍须精确一致。置顶按实际公开接口实现，不固定短工具名。不猜参数、不做测试性标题/创建，不绕过原生接口或手改登记；真正缺失/权限拒绝/身份冲突仍停止。
+- 版本0.14.4，增加与已安装源一致的0.14.3认证基线；保留此前未提交的Grilling/Drawio工作。Windows/PowerShell与Git Bash包专项各7/7，源码校验及0.14.3->0.14.4跨引擎差分通过（8受管文件、2类锁）；日志C:/Temp/codex-flow-0144-parity.log。
+- 只读模拟走查覆盖可延后发现且无预先ID、创建工具缺失、项目查询permission denied；修正元数据不保证完整schema的表述。不曾实际改标题、创建规划聊天或端到端初始化PlcEAP，未重跑此前无关全量锁回归。
+- 本机个人插件已安装0.14.4，原项目已成功初始化，无需重复初始化；未向其他聊天发消息，未修改其他项目。用户明确授权将全部已讨论改动提交、推送并发布0.14.4；不勾选未验收步骤。
+
+## 历史请求：Drawio 绘图与评审技能（0.14.3）
+
+- 2026-10-13 用户提供完整 Drawio 规则，授权整理为 Skill 并融入工作流。新增 skills/drawio-review/SKILL.md 与 agents/openai.yaml，保留原文件/page、文案先批准、结构/视觉检查、最新图稿聊天图片、默认内存输出不落盘及分项认可等要求。
+- AGENTS、运行协议和本地记忆 Skill 已接入按需加载与评审记录；原版 Grilling 及先前未提交工作保留。新增从已安装 0.14.2 认证的升级基线，版本 0.14.3；schema 13 和八个受管路径未变。
+- 本轮验证：Skill Creator 校验、PowerShell 源包校验通过；PowerShell 和 Git Bash/POSIX 包测试各 6/6，通过三技能缺失/错名/空描述、发现路径和第三方来源检查；0.14.2 -> 0.14.3 跨引擎差分通过（8 个受管文件、2 类锁），日志 C:/Temp/codex-flow-0143-parity.log。
+- 独立只读模拟走查覆盖仅改样式、直接给定文案但渲染受阻、参考截图重建并要求上线三个场景。没有真实修改或渲染 drawio，也未验证手机端显示；技能不自带渲染器。未重复运行此前无关锁全回归；旧结果不作为本轮证据。
+- 本机插件已安装 0.14.3，技能和三份集成规则与安装缓存一致；原生 skills/list 返回 codex-project-flow:drawio-review，enabled=true，路径指向 0.14.3。
+- 尚未提交、推送或发布到远端；未自动升级其他已有项目。没有用户总体步骤验收，不勾选计划。旧项目自动路由需在该项目已授权升级中部署新版规则；已安装技能可直接调用。
+
+## 历史请求：内置原版 Grilling（0.14.2）
+
+- 用户要求安装插件即有访谈技能，并指定 Matt Pocock 的 grill-me 原版。早先自建实现已被原版 grilling 替换；不是用户指定原版的自建版本未安装或发布。
+- 固定上游 mattpocock/skills 提交 49dd158d1076134a641b33efb035946536778336。grilling 和两份 UI 元数据保持原文；grill-me 仅将宿主专用 Skill 工具调用适配为读取同包 ../grilling/SKILL.md。
+- MIT 许可、作者版权和逐文件来源/打包哈希保存在 third_party/mattpocock-skills/；插件包含两个技能，Bootstrap/Upgrade 提示传递实际文件路径。
+- 两端校验器拒绝遗漏技能、错名、空描述和错误发现路径。新增 0.14.1 认证基线，版本 0.14.2；工作流 schema 13 与八个受管路径保持不变。
+- 本轮验证（2026-10-11）：原版 grilling 的 Skill Creator 校验、源包 validator、Windows PowerShell 完整回归均通过；记忆测试 21 项通过、1 项因符号链接权限跳过，模型策略 5/5、包测试 6/6、中枢交接 6/6。Git Bash/POSIX 包测试 6/6；0.14.1 -> 0.14.2 跨引擎差分通过（8 受管文件、2 类锁）。没有运行 Linux 全量回归或真实访谈行为测试。
+- 本机个人插件已更新并启用 0.14.2；安装缓存五个第三方文件均通过哈希核验。原生 Codex skills/list 已识别 codex-project-flow:grill-me 和 codex-project-flow:grilling，enabled=true，路径均指向 0.14.2。独立只读审查无阻塞。
+- 本机验证日志：C:/Temp/codex-flow-0142-regression.log 与 C:/Temp/codex-flow-0142-parity.log。
+- 本次范围为本地集成、验证和更新本机插件；尚未提交、推送或发布 0.14.2，不自动升级其他项目，不勾选尚未验收的计划步骤。
+
+## 历史：0.14.1 及此前记录
+
+### 当前目标与授权
 
 修复并发布 0.14.1：解决 Windows bootstrap-lock-release 删除自身独占打开的锁文件失败。用户已授权修复、Windows 验证和发布；不自动升级其他项目。
 
-## 当前进展
+### 当前进展
 
 - 同一原生句柄保持 share=0，校验 owner、project/path、replacement 阶段与退休确认后标记删除；关闭句柄后才报告释放成功。
 - 清理 acquire 和 replacement prepare 本次创建但未发布的锁；失败不删除他人锁。非 Windows 保留原删除路径。
 - 增加认证的 0.14.0 基线、0.14.1 版本元数据和 Windows/POSIX 持续回归。
 
-## 本轮验证：2026-10-11
+### 本轮验证：2026-10-11
 
 - Windows 原问题已复现；修复后的 bootstrap 专项回归通过，包括跨进程独占、pending-delete 排斥和重新获取。
 - Windows PowerShell 5.1 与 PowerShell 7.6.5 原生句柄测试通过（不是完整 5.1 认证）。
 - Windows 模型策略 5/5、中枢交接引擎集成 6/6 通过；0.14.0 的 PowerShell/Git Bash 差分通过，覆盖 8 受管文件、2 类锁。
 - 完整 Windows 回归退出 0。记忆测试 21 项通过、1 项因 WinError 1314 符号链接权限不足跳过；模型策略 5/5、Windows 中枢交接集成 6/6 通过。测试夹具修正 CRLF/hash 假设并补 LF/CRLF 原始字节校验，生产 helper 未改。
 
-## 待完成与验收
+### 待完成与验收
 
 修正版为 0.14.1，发布与远端验证以对应 Git 标签、GitHub Release 和 Actions 记录为准。本机插件随修正版发布更新。真实 Codex 任务 API 的置顶、归档和完整中枢交接尚未验证；没有用户验收，不勾选计划步骤。
 
-## 历史记录：0.12.0
+### 历史记录：0.12.0
 
-### 当前目标
+#### 当前目标
 
 - `0.12.0` / schema 11：永久中枢只负责请求初始理解、首次授权和创建每请求唯一执行任务；最多五个不重叠请求可并行，执行任务负责全部后续交互、文档评审、修改循环、完成验收与自归档。
 
-### 当前进展
+#### 当前进展
 
 - 请求在真实任务 ID 或 queued `clientThreadId` 建立后完成控制权移交，中枢不再处理该 `requestId`。
 - 修改或范围变化由原执行任务重新输出理解和执行项，确认后在相同任务、`requestId` 和 generation 中继续。
@@ -36,7 +66,7 @@
 - `baselines/0.11.0` 用于支持已部署 `0.11.0` 项目升级；最低支持源版本仍为 `0.8.3`。
 - POSIX validator、完整回归、五名额与升级创建屏障交错、`0.11.0 -> 0.12.0` apply/validate/rollback 和基线认证已通过；当前环境没有 `pwsh`，PowerShell 对称实现和测试仅完成静态同步。
 
-### 重要结论
+#### 重要结论
 
 - 中枢是请求启动入口，不是后续消息转发、范围确认、验收或归档层。
 - 执行任务从初始移交后拥有该请求的完整生命周期，不为修改轮次、文档评审或完成否决创建第二个任务。
@@ -44,7 +74,11 @@
 - 文件引擎不能认证真实聊天批准；工作流通过机器契约、运行协议、Skill 和行为测试失败关闭。
 - 本轮不执行 commit、push、tag、GitHub Release 或其他外部发布。
 
-### 下一步
+#### 下一步
 
 - 在具备 `pwsh` 的环境补跑 PowerShell 完整回归和跨平台差分测试。
 - 插件 cachebuster 和重新安装不包含在本次授权中，需要另行确认。
+
+## 0.14.4 发布授权与证据
+
+用户已明确授权提交、推送并发布本轮修改。发布范围包括工具发现修正、原版 Grilling 及 MIT 来源、Drawio 评审技能、历史认证基线和打包/升级测试。发布前本机源包校验及差异格式检查通过；完整 Windows 与 Linux 回归在推送后的 GitHub Actions 执行。最终版本、提交、CI 和发布结果以仓库 Actions 与 v0.14.4 Release 记录为准。

@@ -1,0 +1,40 @@
+{
+  "repository": "https://github.com/mattpocock/skills",
+  "commit": "49dd158d1076134a641b33efb035946536778336",
+  "license": "MIT",
+  "modifications": [
+    "grill-me/SKILL.md: replace the host-specific Skill tool call with a relative read of the bundled grilling/SKILL.md. All other upstream files are unchanged."
+  ],
+  "files": [
+    {
+      "upstream_path": "skills/productivity/grilling/SKILL.md",
+      "bundled_path": "skills/grilling/SKILL.md",
+      "upstream_sha256": "befdff1e27a1dfe2a294d5871169ac1afe16d983911daa4f32627514a48c1e15",
+      "bundled_sha256": "befdff1e27a1dfe2a294d5871169ac1afe16d983911daa4f32627514a48c1e15"
+    },
+    {
+      "upstream_path": "skills/productivity/grilling/agents/openai.yaml",
+      "bundled_path": "skills/grilling/agents/openai.yaml",
+      "upstream_sha256": "1411d7df7d99b7e621a1ff8283c8133cc2464be63d064e52d8ce169c6800ee9b",
+      "bundled_sha256": "1411d7df7d99b7e621a1ff8283c8133cc2464be63d064e52d8ce169c6800ee9b"
+    },
+    {
+      "upstream_path": "skills/productivity/grill-me/SKILL.md",
+      "bundled_path": "skills/grill-me/SKILL.md",
+      "upstream_sha256": "caaf8b8de1684f96e26b28f3c29189db5c89cce4b73e1c93d86164f66ef88637",
+      "bundled_sha256": "ae258702352d9cf199bbcd3c109b874a05a5d98fd2a4b7c3912ab817e7c9dfd0"
+    },
+    {
+      "upstream_path": "skills/productivity/grill-me/agents/openai.yaml",
+      "bundled_path": "skills/grill-me/agents/openai.yaml",
+      "upstream_sha256": "c061e39c3e0f9d865fb1b97556d485704af2a8a58f4b8221a8917a5c2074a32b",
+      "bundled_sha256": "c061e39c3e0f9d865fb1b97556d485704af2a8a58f4b8221a8917a5c2074a32b"
+    },
+    {
+      "upstream_path": "LICENSE",
+      "bundled_path": "third_party/mattpocock-skills/LICENSE",
+      "upstream_sha256": "0e7ac423bf2c6e223b7c5b156f8cf72da49d748e56a1641402c31f22ad07dbb5",
+      "bundled_sha256": "0e7ac423bf2c6e223b7c5b156f8cf72da49d748e56a1641402c31f22ad07dbb5"
+    }
+  ]
+}
