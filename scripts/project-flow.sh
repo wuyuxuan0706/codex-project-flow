@@ -1045,6 +1045,8 @@ def validate_installation(target, allow_placeholders=False, quiet=False, runtime
             "bootstrap-project-flow/references/native-tools.md",
             "drawio-review/SKILL.md",
             "drawio-review/agents/openai.yaml",
+            "guided-coding/SKILL.md",
+            "guided-coding/agents/openai.yaml",
             "grilling/SKILL.md",
             "grilling/agents/openai.yaml",
             "grill-me/SKILL.md",
@@ -1057,10 +1059,10 @@ def validate_installation(target, allow_placeholders=False, quiet=False, runtime
         ])
         actual_skills = sorted(path.relative_to(PLUGIN_ROOT / "skills").as_posix() for path in (PLUGIN_ROOT / "skills").rglob("*") if path.is_file())
         if actual_skills != expected_skills:
-            fail("Plugin must contain exactly the fourteen expected Skill files (including the native-tools reference)", 1)
+            fail("Plugin must contain exactly the sixteen expected Skill files (including guided-coding and the native-tools reference)", 1)
         if plugin.get("skills") != "./skills/":
             fail("Plugin skills must expose ./skills/", 1)
-        for skill_name in ("grilling", "grill-me", "drawio-review"):
+        for skill_name in ("grilling", "grill-me", "drawio-review", "guided-coding"):
             skill = read_text(plugin_input("skills/" + skill_name + "/SKILL.md", "bundled Skill"))
             frontmatter = re.match(r"\A---\n(.*?)\n---(?:\n|\Z)", skill, re.DOTALL)
             if not frontmatter:
@@ -1092,7 +1094,7 @@ def validate_installation(target, allow_placeholders=False, quiet=False, runtime
     if not runtime:
         # Upstream grilling/grill-me have no headings: preserve their bytes and
         # validate their discovery metadata above instead of imposing our layout.
-        for relative in ("README.md", "docs/TEST_CASES.md", "templates/PROJECT_PLAN.md", "templates/PROJECT_STATE.md", "skills/bootstrap-project-flow/SKILL.md", "skills/bootstrap-project-flow/references/native-tools.md", "skills/drawio-review/SKILL.md", "skills/upgrade-project-flow/SKILL.md", "skills/upgrade-project-flow/references/coordination.md", "skills/upgrade-project-flow/references/file-transaction.md"):
+        for relative in ("README.md", "docs/TEST_CASES.md", "templates/PROJECT_PLAN.md", "templates/PROJECT_STATE.md", "skills/bootstrap-project-flow/SKILL.md", "skills/bootstrap-project-flow/references/native-tools.md", "skills/drawio-review/SKILL.md", "skills/guided-coding/SKILL.md", "skills/upgrade-project-flow/SKILL.md", "skills/upgrade-project-flow/references/coordination.md", "skills/upgrade-project-flow/references/file-transaction.md"):
             validate_markdown(plugin_input(relative, "delivery Markdown"), relative)
     for relative in retired_paths:
         if target.path(relative).exists():

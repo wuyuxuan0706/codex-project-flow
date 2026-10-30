@@ -18,7 +18,7 @@ import unittest
 
 
 ROOT = Path(__file__).resolve().parents[1]
-BUNDLED_SKILLS = ("grilling", "grill-me", "drawio-review")
+BUNDLED_SKILLS = ("grilling", "grill-me", "drawio-review", "guided-coding")
 parser = argparse.ArgumentParser(add_help=False)
 parser.add_argument("--engine", choices=("powershell", "posix"),
                     default="powershell" if os.name == "nt" else "posix")

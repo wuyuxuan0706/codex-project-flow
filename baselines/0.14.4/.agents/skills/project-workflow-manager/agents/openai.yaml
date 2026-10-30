@@ -1,0 +1,4 @@
+interface:
+  display_name: "项目本地记忆"
+  short_description: "读取计划与状态，保存重要进展、明确验收和换聊天续接信息"
+  default_prompt: "使用 $project-workflow-manager 读取项目计划与状态，并保存当前任务的重要进展和续接信息。"

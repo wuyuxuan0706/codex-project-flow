@@ -413,7 +413,7 @@ root=pathlib.Path(sys.argv[1])/"baselines"
 print(" ".join(sorted((p.name for p in root.iterdir() if p.is_dir()),key=lambda x:tuple(map(int,x.split("."))))))
 PY
 )
-[ "$versions" = "0.8.3 0.9.0 0.9.1 0.10.0 0.11.0 0.12.0 0.13.0 0.14.0 0.14.1 0.14.2 0.14.3" ]
+[ "$versions" = "0.8.3 0.9.0 0.9.1 0.10.0 0.11.0 0.12.0 0.13.0 0.14.0 0.14.1 0.14.2 0.14.3 0.14.4" ]
 for version in $versions; do
   root="$tmp/plan-$version"
   fixture "$version" "plan-$version"
@@ -434,7 +434,7 @@ set -e
 [ "$unsupported_status" -ne 0 ]
 printf '%s\n' "$unsupported_error" | grep -Fq 'No supported migration from 0.8.2'
 
-for patch_version in 0.8.3 0.9.0 0.9.1 0.10.0 0.11.0 0.12.0 0.13.0 0.14.0 0.14.1 0.14.2 0.14.3; do
+for patch_version in 0.8.3 0.9.0 0.9.1 0.10.0 0.11.0 0.12.0 0.13.0 0.14.0 0.14.1 0.14.2 0.14.3 0.14.4; do
 patch_upgrade="$tmp/patch-upgrade-$patch_version"
 fixture "$patch_version" "patch-upgrade-$patch_version"
 printf '# Custom plan\n\n## 目标\n\n保留计划。\n\n## 总体进度\n\n0%%\n\n## 任务步骤\n\n- [ ] S01 | 保留\n' > "$patch_upgrade/docs/PROJECT_PLAN.md"

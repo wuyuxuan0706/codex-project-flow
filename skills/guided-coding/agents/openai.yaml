@@ -1,0 +1,3 @@
+interface:
+  display_name: "指导式编程"
+  short_description: "逐步讨论架构与逻辑，在聊天提供代码，由你写入，Codex 检查自测"

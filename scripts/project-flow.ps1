@@ -1141,10 +1141,10 @@ if($null-ne$w){
 
 if(-not$Runtime){
  $skillFiles=@(Get-ChildItem -LiteralPath(Join-Path $pluginRoot skills)-Recurse -File|ForEach-Object{$_.FullName.Substring((Join-Path $pluginRoot skills).Length+1).Replace([char]92,[char]47)}|Sort-Object)
- $expectedSkills=@("bootstrap-project-flow/SKILL.md","bootstrap-project-flow/agents/openai.yaml","bootstrap-project-flow/references/native-tools.md","drawio-review/SKILL.md","drawio-review/agents/openai.yaml","grilling/SKILL.md","grilling/agents/openai.yaml","grill-me/SKILL.md","grill-me/agents/openai.yaml","upgrade-project-flow/SKILL.md","upgrade-project-flow/agents/openai.yaml","upgrade-project-flow/references/coordination.md","upgrade-project-flow/references/file-transaction.md","upgrade-project-flow/references/hub-refresh.md")|Sort-Object
+ $expectedSkills=@("bootstrap-project-flow/SKILL.md","bootstrap-project-flow/agents/openai.yaml","bootstrap-project-flow/references/native-tools.md","drawio-review/SKILL.md","drawio-review/agents/openai.yaml","guided-coding/SKILL.md","guided-coding/agents/openai.yaml","grilling/SKILL.md","grilling/agents/openai.yaml","grill-me/SKILL.md","grill-me/agents/openai.yaml","upgrade-project-flow/SKILL.md","upgrade-project-flow/agents/openai.yaml","upgrade-project-flow/references/coordination.md","upgrade-project-flow/references/file-transaction.md","upgrade-project-flow/references/hub-refresh.md")|Sort-Object
  Eq $skillFiles $expectedSkills skill-files
  Eq ([string]$plugin.skills) "./skills/" plugin-skills
- foreach($skillName in @("grilling","grill-me","drawio-review")){try{
+ foreach($skillName in @("grilling","grill-me","drawio-review","guided-coding")){try{
   $skill=Text (Resolve-PluginPath "skills/$skillName/SKILL.md" "bundled Skill")
   $frontmatter=[regex]::Match($skill,'\A---\n(.*?)\n---(?:\n|\z)',[Text.RegularExpressions.RegexOptions]::Singleline)
   if(-not$frontmatter.Success){Fail "$skillName Skill requires YAML frontmatter"}else{
@@ -1165,7 +1165,7 @@ foreach($e in $entries){try{$live=Resolve-TargetPath ([string]$e.path);if(-not(T
 foreach($r in $retiredPaths){try{$retired=Resolve-TargetPath ([string]$r);if(Test-Path -LiteralPath $retired){Fail "retired file remains $r"}}catch{Fail $_.Exception.Message}}
 
 # Upstream grilling/grill-me have no headings; keep their bytes and validate metadata above.
-if(-not$Runtime){foreach($relative in @("README.md","docs/TEST_CASES.md","templates/PROJECT_PLAN.md","templates/PROJECT_STATE.md","skills/bootstrap-project-flow/SKILL.md","skills/bootstrap-project-flow/references/native-tools.md","skills/drawio-review/SKILL.md","skills/upgrade-project-flow/SKILL.md","skills/upgrade-project-flow/references/coordination.md","skills/upgrade-project-flow/references/file-transaction.md")){try{Markdown (Resolve-PluginPath $relative "delivery Markdown") $relative}catch{Fail $_.Exception.Message}}}
+if(-not$Runtime){foreach($relative in @("README.md","docs/TEST_CASES.md","templates/PROJECT_PLAN.md","templates/PROJECT_STATE.md","skills/bootstrap-project-flow/SKILL.md","skills/bootstrap-project-flow/references/native-tools.md","skills/drawio-review/SKILL.md","skills/guided-coding/SKILL.md","skills/upgrade-project-flow/SKILL.md","skills/upgrade-project-flow/references/coordination.md","skills/upgrade-project-flow/references/file-transaction.md")){try{Markdown (Resolve-PluginPath $relative "delivery Markdown") $relative}catch{Fail $_.Exception.Message}}}
 
 $mp=Resolve-TargetPath ".project-flow/manifest.json" -AllowControl
 if(Test-SafeFile $mp "manifest"){$mi=Json $mp manifest;if($null-ne$mi){Eq([int]$mi.schema_version)1 manifest-schema;Eq([string]$mi.workflow_version)$version manifest-version;Eq @($mi.files.path)$paths manifest-paths;$name=[string]$mi.project_name;if([string]::IsNullOrWhiteSpace($name)-or$name-eq"<PROJECT_NAME>"){Fail "bad project name"};foreach($e in $entries){$r=@($mi.files|Where-Object path -ceq $e.path);if($r.Count-ne1){continue};if($r[0].source-cne$e.source-or$r[0].policy-cne$e.policy){Fail "manifest metadata $($e.path)"};$expected=Hash(Render(Text(Join-Path $pluginRoot([string]$e.source)))([string]$e.render)$name);if($r[0].baseline_hash-cne$expected){Fail "manifest hash $($e.path)"}}}}

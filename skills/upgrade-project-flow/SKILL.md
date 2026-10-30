@@ -11,6 +11,12 @@ Once a real task ID or queued `clientThreadId` exists, the upgrade task owns pla
 
 All visible task creation omits `model` and `thinking`, following Codex defaults rather than role-based overrides.
 
+## Guided project coding
+
+The installed workflow uses one project-coding arrangement: the user writes code, while Codex provides small code proposals in chat and performs inspection and self-tests on the actual edited files. Each round covers one small goal and waits for explicit continuation; questions stay at the current goal. Other project operations are instructions for the user. Planning records jointly confirmed architecture before coding, preserving existing decisions; it never creates an automatic-implementation mode. When creating planning prompts, include the deployed protocol's **用户编写与 Codex 指导** section and the resolved `pluginRoot/skills/guided-coding/SKILL.md` path for architecture and later coding guidance. A missing skill catalog does not authorize direct source edits; the deployed protocol retains the essential rules.
+
+This arrangement does not suppress explicitly authorized workflow operations: Bootstrap/Upgrade still apply their managed-file transactions, identity and chat mutations, and memory saves through the designated engines/helpers. It grants no authority over unrelated project code or user operations. Preserve existing plan/state and resume the same small goal during recovery rather than restarting or filling in code automatically.
+
 ## Native tool preflight
 
 Before declaring project/chat tools unavailable or evaluating a missing project ID, read [../bootstrap-project-flow/references/native-tools.md](../bootstrap-project-flow/references/native-tools.md) and perform its discovery and read-only probe. Workflow short names denote capabilities; resolve the actual advertised names and schemas. This does not relax identity, locking, capacity or barrier checks and does not authorize test mutations.
